@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block extra_head %}
+{% load static %}
+<script src="{% static 'core/js/chart.umd.js' %}"></script>
+<style>
+  canvas{max-height:280px;}
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Reports</h1><p>Inventory health and donation trends across all branches.</p></div></div>
+
+<div class="stat-strip">
+  <div class="stat-tile"><div class="num">{{ total_donors }}</div><div class="lbl">Total donors</div></div>
+  <div class="stat-tile"><div class="num">{{ total_donations }}</div><div class="lbl">Total donations</div></div>
+  <div class="stat-tile"><div class="num">{{ total_issued_units }}</div><div class="lbl">Units issued</div></div>
+  <div class="stat-tile {% if expired_units > 0 %}low{% endif %}"><div class="num">{{ expired_units }}</div><div class="lbl">Units expired</div></div>
+</div>
+
+{% if low_stock %}
+<div class="panel panel-action">
+  <h3 style="margin-bottom:6px;">Low stock alert</h3>
+  <p class="small" style="margin:0;">These blood groups are at or below the low-stock threshold: <strong>{{ low_stock|join:", " }}</strong></p>
+</div>
+{% endif %}
+
+<div class="grid-2">
+  <div class="panel">
+    <h3>Available stock by blood group</h3>
+    <canvas id="stockChart"></canvas>
+  </div>
+  <div class="panel">
+    <h3>Donations — last 14 days</h3>
+    <canvas id="trendChart"></canvas>
+  </div>
+</div>
+
+<script>
+  const stockCtx = document.getElementById('stockChart');
+  new Chart(stockCtx, {
+    type: 'bar',
+    data: {
+      labels: {{ stock_labels|safe }},
+      datasets: [{ label: 'Available units', data: {{ stock_values|safe }}, backgroundColor: '#7D1935', borderRadius: 4 }]
+    },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision:0 } } } }
+  });
+
+  const trendCtx = document.getElementById('trendChart');
+  new Chart(trendCtx, {
+    type: 'line',
+    data: {
+      labels: {{ trend_labels|safe }},
+      datasets: [{ label: 'Donations', data: {{ trend_values|safe }}, borderColor: '#145C52', backgroundColor: 'rgba(20,92,82,0.12)', fill: true, tension: 0.3 }]
+    },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision:0 } } } }
+  });
+</script>
+{% endblock %}

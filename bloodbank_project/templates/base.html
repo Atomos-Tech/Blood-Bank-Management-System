@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{% block title %}BloodConnect{% endblock %}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% load static %}
+<style>
+  @font-face{
+    font-family:'Inter';
+    src:url('{% static "core/fonts/Inter.ttf" %}') format('truetype');
+    font-weight:100 900; font-style:normal; font-display:swap;
+  }
+  @font-face{
+    font-family:'Fraunces';
+    src:url('{% static "core/fonts/Fraunces.ttf" %}') format('truetype');
+    font-weight:100 900; font-style:normal; font-display:swap;
+  }
+  :root{
+    --paper:#FAF8F5;
+    --paper-dim:#F1ECE4;
+    --ink:#1B1B1E;
+    --ink-soft:#5B5650;
+    --garnet:#7D1935;
+    --garnet-dark:#5E1227;
+    --teal:#145C52;
+    --teal-bg:#E6F0EE;
+    --amber:#B8752B;
+    --amber-bg:#FBF0E1;
+    --charcoal:#201B1D;
+    --line:#E4DED3;
+    --danger:#A6293C;
+    --danger-bg:#FBE9EC;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Inter',system-ui,sans-serif;
+    font-size:15.5px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3,.display{
+    font-family:'Fraunces',Georgia,serif;
+    font-weight:600;
+    letter-spacing:-0.01em;
+    color:var(--ink);
+    margin:0 0 0.4em 0;
+  }
+  a{color:var(--garnet); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .container{max-width:1120px; margin:0 auto; padding:0 24px;}
+  .container-narrow{max-width:640px; margin:0 auto; padding:0 24px;}
+
+  .topbar{background:var(--charcoal); color:#EFE9E2; padding:14px 0;}
+  .topbar .container{display:flex; align-items:center; justify-content:space-between;}
+  .brand{font-family:'Fraunces',serif; font-weight:600; font-size:1.28rem; color:#fff; display:flex; align-items:center; gap:9px;}
+  .brand .dot{width:10px; height:10px; border-radius:50%; background:var(--garnet); display:inline-block;}
+  .topbar-right{display:flex; align-items:center;}
+  .topbar-right > *{margin-left:16px;}
+  .topbar-right > *:first-child{margin-left:0;}
+  .topbar a.link{color:#D8D0C6; font-size:0.92rem; position:relative;}
+  .topbar a.link:hover{color:#fff; text-decoration:none;}
+  .who{color:#B7AEA1; font-size:0.86rem;}
+  .btn{display:inline-block; padding:9px 18px; border-radius:7px; font-size:0.92rem; font-weight:600; border:1px solid transparent; cursor:pointer; text-align:center;}
+  .btn:hover{text-decoration:none;}
+  .btn-primary{background:var(--garnet); color:#fff;}
+  .btn-primary:hover{background:var(--garnet-dark); color:#fff;}
+  .btn-ghost-light{background:transparent; color:#EFE9E2; border-color:#4B4448;}
+  .btn-ghost-light:hover{background:#2B2426; color:#fff;}
+  .btn-outline{background:transparent; color:var(--ink); border-color:var(--line);}
+  .btn-outline:hover{border-color:var(--ink); background:var(--paper-dim);}
+  .btn-sm{padding:6px 13px; font-size:0.83rem; border-radius:6px;}
+  .btn-success{background:var(--teal); color:#fff;}
+  .btn-success:hover{background:#0F4A42; color:#fff;}
+  .btn-danger{background:var(--danger); color:#fff;}
+  .btn-danger:hover{background:#8A2130; color:#fff;}
+
+  .bell-badge{background:var(--garnet); color:#fff; font-size:0.68rem; font-weight:700; padding:1px 6px; border-radius:9px; margin-left:5px;}
+
+  .page{padding:38px 0 70px;}
+  .page-head{margin-bottom:28px; display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap;}
+  .page-head > *{margin-right:20px;}
+  .page-head h1{font-size:1.9rem;}
+  .page-head p{color:var(--ink-soft); margin:0; max-width:56ch;}
+  .page-head-actions{display:flex; flex-wrap:wrap;}
+  .page-head-actions > *{margin-right:10px; margin-bottom:8px;}
+
+  .panel{background:#fff; border:1px solid var(--line); border-radius:10px; padding:22px 24px; margin-bottom:20px;}
+  .panel h2, .panel h3{font-size:1.15rem; margin-bottom:14px;}
+  .panel-action{border-left:3px solid var(--amber); background:var(--amber-bg); border-radius:0 10px 10px 0;}
+  .panel-healthy{border-left:3px solid var(--teal); background:var(--teal-bg); border-radius:0 10px 10px 0;}
+  .panel-danger{border-left:3px solid var(--danger); background:var(--danger-bg); border-radius:0 10px 10px 0;}
+
+  .stat-strip{display:flex; flex-wrap:wrap; background:var(--line); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:24px;}
+  .stat-strip .stat-tile{flex:1 1 0; min-width:90px; border-right:1px solid var(--line); border-bottom:1px solid var(--line);}
+  .stat-strip .stat-tile:last-child{border-right:none;}
+  @media (max-width:700px){.stat-strip .stat-tile{flex:1 1 40%;}}
+  .stat-tile{background:#fff; padding:16px 14px; text-align:center;}
+  .stat-tile .num{font-family:'Fraunces',serif; font-size:1.7rem; font-weight:600; color:var(--garnet); line-height:1;}
+  .stat-tile .lbl{font-size:0.78rem; color:var(--ink-soft); margin-top:5px;}
+  .stat-tile.low .num{color:var(--danger);}
+
+  table{width:100%; border-collapse:collapse; background:#fff;}
+  table th{background:var(--paper-dim); text-align:left; font-size:0.78rem; font-weight:600; color:var(--ink-soft); padding:10px 14px; border-bottom:1px solid var(--line);}
+  table td{padding:11px 14px; border-bottom:1px solid var(--line); font-size:0.9rem;}
+  table tr:last-child td{border-bottom:none;}
+  .table-wrap{border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:20px;}
+
+  .badge{display:inline-block; padding:3px 10px; border-radius:20px; font-size:0.74rem; font-weight:600;}
+  .badge-teal{background:var(--teal-bg); color:var(--teal);}
+  .badge-amber{background:var(--amber-bg); color:var(--amber);}
+  .badge-danger{background:var(--danger-bg); color:var(--danger);}
+  .badge-neutral{background:var(--paper-dim); color:var(--ink-soft);}
+  .badge-garnet{background:#F3E3E7; color:var(--garnet);}
+
+  label{display:block; font-size:0.85rem; font-weight:600; margin:14px 0 6px; color:var(--ink);}
+  input[type=text],input[type=email],input[type=password],input[type=number],
+  input[type=date],input[type=time],select,textarea{
+    width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:7px;
+    font-family:'Inter',sans-serif; font-size:0.92rem; background:#fff; color:var(--ink);
+  }
+  input:focus,select:focus,textarea:focus{outline:none; border-color:var(--garnet); box-shadow:0 0 0 3px rgba(125,25,53,0.12);}
+  input[type=checkbox]{width:auto; margin-right:8px;}
+  .helptext{font-size:0.78rem; color:var(--ink-soft); margin-top:4px;}
+  ul.errorlist{color:var(--danger); font-size:0.82rem; padding-left:18px; margin:2px 0; list-style:none;}
+  form p{margin:0;}
+
+  .alert{padding:12px 16px; border-radius:8px; margin-bottom:16px; font-size:0.9rem; border-left:3px solid transparent;}
+  .alert-success{background:var(--teal-bg); color:var(--teal); border-color:var(--teal);}
+  .alert-error{background:var(--danger-bg); color:var(--danger); border-color:var(--danger);}
+  .alert-warning{background:var(--amber-bg); color:var(--amber); border-color:var(--amber);}
+  .alert-info{background:#E9EEF6; color:#2A4A75; border-color:#2A4A75;}
+
+  .grid-2{display:flex; flex-wrap:wrap;}
+  .grid-2 > *{flex:1 1 300px; margin-right:20px;}
+  .grid-2 > *:last-child{margin-right:0;}
+  @media (max-width:820px){.grid-2 > *{margin-right:0;}}
+
+  footer{color:var(--ink-soft); font-size:0.82rem; text-align:center; padding:34px 0 20px; border-top:1px solid var(--line); margin-top:40px;}
+  .muted{color:var(--ink-soft);}
+  .small{font-size:0.85rem;}
+</style>
+{% block extra_head %}{% endblock %}
+</head>
+<body>
+<div class="topbar">
+  <div class="container">
+    <a href="{% url 'home' %}" class="brand"><span class="dot"></span>BloodConnect</a>
+    <div class="topbar-right">
+      {% if user.is_authenticated %}
+        {% if user.role != "ADMIN" %}
+          <a href="{% url 'notifications' %}" class="link">Notifications{% if unread_notification_count %}<span class="bell-badge">{{ unread_notification_count }}</span>{% endif %}</a>
+        {% endif %}
+        {% if user.role == "STAFF" or user.role == "ADMIN" %}
+          <a href="{% url 'reports_view' %}" class="link">Reports</a>
+        {% endif %}
+        {% if user.role == "ADMIN" %}
+          <a href="{% url 'settings_view' %}" class="link">Settings</a>
+          <a href="/admin/" class="link">Admin</a>
+        {% endif %}
+        <span class="who">{{ user.username }} · {{ user.get_role_display }}</span>
+        <a href="{% url 'logout' %}" class="btn btn-ghost-light btn-sm">Log out</a>
+      {% else %}
+        <a href="{% url 'login' %}" class="link">Log in</a>
+        <a href="{% url 'signup_donor' %}" class="btn btn-primary btn-sm">Become a donor</a>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="page">
+  <div class="container">
+    {% if messages %}
+      {% for message in messages %}
+        <div class="alert alert-{{ message.tags }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+    {% block content %}{% endblock %}
+  </div>
+</div>
+
+<footer>Blood Donation &amp; Availability Management System — built on Django</footer>
+</body>
+</html>

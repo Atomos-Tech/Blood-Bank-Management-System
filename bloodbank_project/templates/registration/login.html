@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-narrow" style="padding-top:20px;">
+  <div class="panel" style="max-width:440px; margin:0 auto;">
+    <h1 style="font-size:1.5rem;">Log in</h1>
+    <p class="muted small" style="margin-bottom:10px;">Access your BloodConnect dashboard.</p>
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button class="btn btn-primary" style="width:100%; margin-top:18px;" type="submit">Log in</button>
+    </form>
+    <p class="small muted" style="margin-top:16px;">New donor? <a href="{% url 'signup_donor' %}">Register here</a>. Hospital? <a href="{% url 'signup_hospital' %}">Sign up here</a>.</p>
+  </div>
+</div>
+{% endblock %}

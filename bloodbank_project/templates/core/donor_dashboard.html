@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Hello, {{ donor.user.first_name|default:donor.user.username }}</h1>
+    <p>Blood group {{ donor.blood_group }} · registered at {{ donor.branch }}</p>
+  </div>
+  <div class="page-head-actions">
+    <a href="{% url 'book_appointment' %}" class="btn btn-primary">Book a donation appointment</a>
+  </div>
+</div>
+
+<div class="grid-2">
+  <div>
+    {% if eligible %}
+    <div class="panel panel-healthy">
+      <h3 style="margin-bottom:6px;">You're eligible to donate</h3>
+      <p class="small" style="margin:0;">Book an appointment whenever it suits you.</p>
+    </div>
+    {% else %}
+    <div class="panel panel-action">
+      <h3 style="margin-bottom:6px;">Not yet eligible</h3>
+      <ul style="margin:6px 0 0; padding-left:18px;">
+        {% for r in reasons %}<li class="small">{{ r }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+
+    {% if next_eligible_date %}
+    <div class="panel">
+      <h3>Next eligible date</h3>
+      <p style="font-family:'Fraunces',serif; font-size:1.6rem; margin:0;">{{ next_eligible_date }}</p>
+    </div>
+    {% endif %}
+
+    <div class="panel">
+      <h3>Upcoming appointments</h3>
+      {% if upcoming_appointments %}
+        {% for a in upcoming_appointments %}
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line);">
+          <div>
+            <strong>{{ a.scheduled_date }}</strong> at {{ a.scheduled_time }}
+            <div class="small muted">{{ a.branch }}</div>
+          </div>
+          <a href="{% url 'cancel_appointment' a.id %}" class="btn btn-outline btn-sm" onclick="return confirm('Cancel this appointment?');">Cancel</a>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted small">No appointments booked yet.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Donation history</h3>
+    {% if donations %}
+    <div class="table-wrap" style="border:none;">
+      <table>
+        <thead><tr><th>Date</th><th>Volume</th><th>Result</th></tr></thead>
+        <tbody>
+          {% for d in donations %}
+          <tr>
+            <td>{{ d.donation_date }}</td>
+            <td>{{ d.volume_ml }} ml</td>
+            <td>
+              {% if d.test_result == "PASSED" %}<span class="badge badge-teal">Passed</span>
+              {% elif d.test_result == "FAILED" %}<span class="badge badge-danger">Failed</span>
+              {% else %}<span class="badge badge-amber">Pending</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <p class="muted small">No donations recorded yet — book an appointment to make your first one.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

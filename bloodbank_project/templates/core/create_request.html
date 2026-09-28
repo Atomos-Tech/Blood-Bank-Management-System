@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-narrow">
+  <div class="page-head"><div><h1>New blood request</h1><p>Staff will review and approve based on compatible stock.</p></div></div>
+  <div class="panel">
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button class="btn btn-primary" style="width:100%; margin-top:18px;" type="submit">Submit request</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

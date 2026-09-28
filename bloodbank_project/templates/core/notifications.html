@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><div><h1>Notifications</h1><p>Updates about your donations, appointments, and requests.</p></div></div>
+<div class="panel" style="padding:0;">
+  {% if notes %}
+    {% for n in notes %}
+    <div style="padding:16px 22px; border-bottom:1px solid var(--line);">
+      <p style="margin:0;">{{ n.message }}</p>
+      <span class="small muted">{{ n.created_at|date:"M d, Y — g:i A" }}</span>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p class="muted" style="padding:22px;">Nothing here yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

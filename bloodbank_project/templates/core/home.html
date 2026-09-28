@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block extra_head %}
+<style>
+  .hero{padding:56px 0 44px; display:flex; flex-wrap:wrap; align-items:center;}
+  .hero > *:first-child{flex:1 1 420px; margin-right:48px;}
+  .hero > *:last-child{flex:1 1 320px;}
+  .hero h1{font-size:2.7rem; line-height:1.08; max-width:14ch;}
+  .hero p.lede{font-size:1.08rem; color:var(--ink-soft); max-width:46ch; margin:16px 0 26px;}
+  .hero-actions{display:flex; flex-wrap:wrap;}
+  .hero-actions > *{margin-right:12px; margin-bottom:8px;}
+
+  .pulse-card{background:var(--charcoal); border-radius:16px; padding:34px 30px; color:#EFE9E2; position:relative; overflow:hidden;}
+  .pulse-card .eyebrow2{font-size:0.82rem; color:#B7AEA1; margin-bottom:10px;}
+  .pulse-row{display:flex; align-items:baseline; gap:12px;}
+  .pulse-dot{width:11px; height:11px; border-radius:50%; background:#3FBFA6; box-shadow:0 0 0 0 rgba(63,191,166,0.6); animation:pulse 1.8s infinite;}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(63,191,166,0.55);}
+    70%{box-shadow:0 0 0 11px rgba(63,191,166,0);}
+    100%{box-shadow:0 0 0 0 rgba(63,191,166,0);}
+  }
+  .pulse-card .big{font-family:'Fraunces',serif; font-size:3.6rem; font-weight:600; line-height:1;}
+  .pulse-card .cap{color:#D8D0C6; font-size:0.95rem; margin-top:6px;}
+  .mini-stats{display:flex; margin-top:26px; border-top:1px solid #3A3336; padding-top:20px;}
+  .mini-stats > div{margin-right:26px;}
+  .mini-stats div .n{font-family:'Fraunces',serif; font-size:1.3rem; font-weight:600;}
+  .mini-stats div .l{font-size:0.76rem; color:#B7AEA1;}
+
+  .roles{display:flex; flex-wrap:wrap; margin-top:10px;}
+  .roles > *{flex:1 1 260px; margin-right:20px; margin-bottom:20px;}
+  .roles > *:last-child{margin-right:0;}
+  .role-card{border:1px solid var(--line); border-radius:12px; padding:24px; background:#fff;}
+  .role-card h3{font-size:1.1rem; margin-bottom:8px;}
+  .role-card p{color:var(--ink-soft); font-size:0.9rem; margin:0 0 14px;}
+</style>
+{% endblock %}
+{% block content %}
+<div class="hero">
+  <div>
+    <h1>Every donation keeps someone's clock running.</h1>
+    <p class="lede">BloodConnect links donors, blood bank staff, and hospitals on one system — so the right blood group reaches the right patient before it's too late.</p>
+    <div class="hero-actions">
+      <a href="{% url 'signup_donor' %}" class="btn btn-primary">Register as donor</a>
+      <a href="{% url 'signup_hospital' %}" class="btn btn-outline">Request blood for a hospital</a>
+    </div>
+  </div>
+  <div class="pulse-card">
+    <div class="eyebrow2">Live right now</div>
+    <div class="pulse-row">
+      <span class="pulse-dot"></span>
+      <span class="big">{{ available_units }}</span>
+    </div>
+    <div class="cap">units available across {{ total_branches }} branch{{ total_branches|pluralize:"es" }}</div>
+    <div class="mini-stats">
+      <div><div class="n">{{ total_donors }}</div><div class="l">Registered donors</div></div>
+      <div><div class="n">{{ units_issued_all_time }}</div><div class="l">Units issued to date</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="roles">
+  <div class="role-card">
+    <h3>For donors</h3>
+    <p>Check your eligibility instantly, book a donation appointment, and see your full donation history in one place.</p>
+    <a href="{% url 'signup_donor' %}">Register as a donor</a>
+  </div>
+  <div class="role-card">
+    <h3>For blood bank staff</h3>
+    <p>Record donations, log lab results, and watch live inventory update itself — no more spreadsheets or paper registers.</p>
+    <a href="{% url 'login' %}">Staff log in</a>
+  </div>
+  <div class="role-card">
+    <h3>For hospitals</h3>
+    <p>Search live stock by blood group and branch, raise a request, and track it through to fulfilment.</p>
+    <a href="{% url 'signup_hospital' %}">Sign up your hospital</a>
+  </div>
+</div>
+{% endblock %}

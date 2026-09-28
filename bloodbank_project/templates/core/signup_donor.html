@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-narrow">
+  <div class="page-head">
+    <div>
+      <h1>Register as a blood donor</h1>
+      <p>Takes about two minutes. You'll get an account to track eligibility and donation history.</p>
+    </div>
+  </div>
+  <div class="panel">
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button class="btn btn-primary" style="width:100%; margin-top:18px;" type="submit">Create donor account</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

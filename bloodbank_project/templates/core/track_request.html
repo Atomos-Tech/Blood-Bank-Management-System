@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-narrow">
+  <div class="page-head"><div><h1>Request #{{ br.id }}</h1><p>{{ br.blood_group }} · {{ br.units_needed }} unit(s) · {{ br.patient_name }}</p></div></div>
+  <div class="panel {% if br.status == 'ISSUED' %}panel-healthy{% elif br.status == 'REJECTED' %}panel-danger{% elif br.status == 'PENDING' %}panel-action{% endif %}">
+    <h3 style="margin-bottom:6px;">
+      {% if br.status == "ISSUED" %}Issued
+      {% elif br.status == "APPROVED" %}Approved — awaiting issue
+      {% elif br.status == "REJECTED" %}Rejected
+      {% else %}Pending review{% endif %}
+    </h3>
+    {% if br.issued_units.all %}
+    <ul style="margin:8px 0 0; padding-left:18px;">
+      {% for u in br.issued_units.all %}<li class="small">Unit #{{ u.id }} — {{ u.blood_group }} (branch: {{ u.branch }})</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  <a href="{% url 'hospital_dashboard' %}" class="btn btn-outline">Back to dashboard</a>
+</div>
+{% endblock %}

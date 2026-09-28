@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><div><h1>Blood inventory</h1><p>Every collected unit, its branch, and its current status.</p></div></div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Unit #</th><th>Group</th><th>Branch</th><th>Collected</th><th>Expiry</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for u in units %}
+      <tr>
+        <td>{{ u.id }}</td><td>{{ u.blood_group }}</td><td>{{ u.branch }}</td>
+        <td>{{ u.collection_date }}</td><td>{{ u.expiry_date }}</td>
+        <td>
+          {% if u.status == "AVAILABLE" %}<span class="badge badge-teal">Available</span>
+          {% elif u.status == "ISSUED" %}<span class="badge badge-garnet">Issued</span>
+          {% elif u.status == "EXPIRED" %}<span class="badge badge-neutral">Expired</span>
+          {% elif u.status == "QUARANTINED" %}<span class="badge badge-amber">Quarantined</span>
+          {% else %}<span class="badge badge-neutral">{{ u.status }}</span>{% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6" class="muted" style="text-align:center;">No units yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
