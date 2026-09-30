@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bbms
+      POSTGRES_USER: bbms
+      POSTGRES_PASSWORD: change-before-deployment
+    volumes: [postgres_data:/var/lib/postgresql/data]
+  web:
+    build: .
+    command: gunicorn bbms.wsgi:application --bind 0.0.0.0:8000
+    environment:
+      BBMS_DB_ENGINE: postgresql
+      POSTGRES_DB: bbms
+      POSTGRES_USER: bbms
+      POSTGRES_PASSWORD: change-before-deployment
+      POSTGRES_HOST: db
+      BBMS_SECURE_SSL: "0"
+      BBMS_DEBUG: "0"
+    depends_on: [db]
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["80:80"]
+    volumes: ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on: [web]
+volumes:
+  postgres_data:
