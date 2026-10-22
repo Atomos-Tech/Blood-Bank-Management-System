@@ -36,6 +36,7 @@ class AuditEvent(models.Model):
 
 class Donor(models.Model):
     user = models.OneToOneField(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="donor_profile")
+    branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.PROTECT, related_name="donors")
     full_name = models.CharField(max_length=120)
     email = models.EmailField(unique=True)
     phone = models.CharField(max_length=20)
@@ -46,6 +47,7 @@ class Donor(models.Model):
     consent_given = models.BooleanField(default=False)
     eligibility_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    def __str__(self): return f"{self.full_name} ({self.blood_group})"
 
 class Deferral(models.Model):
     donor = models.ForeignKey(Donor, on_delete=models.PROTECT, related_name="deferrals")
@@ -101,6 +103,11 @@ class BloodUnit(models.Model):
     expiry_at = models.DateTimeField()
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.COLLECTED)
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "branch", "blood_group", "component", "expiry_at"], name="unit_search_idx"),
+            models.Index(fields=["branch", "expiry_at"], name="unit_branch_expiry_idx"),
+        ]
 
 class TestType(models.Model):
     name = models.CharField(max_length=64, unique=True)
@@ -128,6 +135,10 @@ class BloodRequest(models.Model):
     clinical_reference = models.CharField(max_length=120)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        indexes = [
+            models.Index(fields=["branch", "status", "-created_at"], name="req_branch_status_idx"),
+        ]
 
 class RequestTransition(models.Model):
     request = models.ForeignKey(BloodRequest, on_delete=models.PROTECT, related_name="transitions")
@@ -137,11 +148,19 @@ class RequestTransition(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 class Reservation(models.Model):
-    unit = models.OneToOneField(BloodUnit, on_delete=models.PROTECT, related_name="reservation")
+    unit = models.ForeignKey(BloodUnit, on_delete=models.PROTECT, related_name="reservations")
     request = models.ForeignKey(BloodRequest, on_delete=models.PROTECT, related_name="reservations")
     reserved_by = models.ForeignKey(User, on_delete=models.PROTECT)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["unit"],
+                condition=Q(active=True),
+                name="unique_active_reservation_per_unit",
+            )
+        ]
 
 class CrossMatch(models.Model):
     reservation = models.OneToOneField(Reservation, on_delete=models.PROTECT)

@@ -1,0 +1,64 @@
+{
+  "environment": {
+    "timestamp_utc": "2026-10-22T07:12:17Z",
+    "os": "Darwin 24.1.0 (arm64)",
+    "python_version": "3.12.10",
+    "django_version": "5.2.17",
+    "database_engine": "django.db.backends.sqlite3",
+    "seeded_donors": 5000,
+    "seeded_units": 10000,
+    "seed_seconds": 0.58
+  },
+  "TC_N01_NFR_01": {
+    "concurrent_users": 100,
+    "total_requests": 600,
+    "error_count": 0,
+    "total_wall_seconds": 3.236,
+    "throughput_rps": 185.4,
+    "p50_ms": 178.86,
+    "p95_ms": 1665.0,
+    "p99_ms": 2643.57,
+    "max_ms": 3210.86,
+    "percent_within_3s": 99.67,
+    "sla_passed": true,
+    "by_endpoint": {
+      "GET / (dashboard)": {
+        "count": 200,
+        "mean_ms": 713.66,
+        "p50_ms": 459.88,
+        "p95_ms": 2196.02,
+        "p99_ms": 2995.9,
+        "max_ms": 3210.86
+      },
+      "GET /inventory/ (search)": {
+        "count": 200,
+        "mean_ms": 339.78,
+        "p50_ms": 181.64,
+        "p95_ms": 1318.89,
+        "p99_ms": 2195.85,
+        "max_ms": 2518.14
+      },
+      "GET /api/v1/inventory/ (API search)": {
+        "count": 200,
+        "mean_ms": 262.34,
+        "p50_ms": 115.08,
+        "p95_ms": 1128.49,
+        "p99_ms": 1705.97,
+        "max_ms": 2356.82
+      }
+    }
+  },
+  "TC_N02_NFR_02": {
+    "concurrent_requests": 20,
+    "available_units_pool": 5,
+    "successful_reservations": 5,
+    "active_reservations_in_db": 5,
+    "duplicate_unit_assignments": 0,
+    "total_wall_seconds": 0.196,
+    "p50_ms": 149.34,
+    "p95_ms": 160.81,
+    "max_ms": 194.45,
+    "all_within_5s": true,
+    "sla_passed": true
+  }
+}
