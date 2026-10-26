@@ -291,13 +291,16 @@ def appointment_view(request):
     if not donor:
         return redirect("donors")
     form = AppointmentForm(request.POST or None, branch=ub)
+    # FR-04: evaluate every rule up front so the donor sees all failures before trying to book.
+    ok, reasons = eligibility(donor)
     if request.method == "POST" and form.is_valid():
-        ok, reasons = eligibility(donor)
         slot = form.cleaned_data["slot"]
         if role(request.user) in STAFF and not in_branch_scope(request.user, slot.branch_id):
             return deny(request.user, "Cross-branch slot booking denied")
         if not ok:
-            form.add_error(None, "Appointment blocked: " + " ".join(reasons))
+            form.add_error(None, "Appointment blocked until every eligibility rule passes.")
+            audit(request.user, "APPOINTMENT_BLOCKED", donor, outcome="REJECTED",
+                  summary=f"{len(reasons)} eligibility rule(s) failed", branch=slot.branch)
         elif slot.available <= 0:
             form.add_error("slot", "This slot is full.")
         else:
@@ -312,10 +315,13 @@ def appointment_view(request):
             return redirect("my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors")
     return render(
         request,
-        "bloodbank/form.html",
+        "bloodbank/appointments.html",
         {
             "title": "Book appointment",
             "form": form,
+            "donor": donor,
+            "eligible": ok,
+            "reasons": reasons,
             "cancel": "my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors",
         },
     )

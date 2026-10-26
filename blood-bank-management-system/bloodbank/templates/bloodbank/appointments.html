@@ -1,0 +1,18 @@
+{% extends 'bloodbank/base.html' %}{% block title %}{{ title }}{% endblock %}{% block content %}
+<div class="grid2">
+<section class="panel form-panel">
+  <h3>{{ title }}{% if donor %} · {{ donor.full_name }}{% endif %}</h3>
+  {% if not eligible %}
+  <div class="eligibility-block" role="alert">
+    <p class="error"><b>Booking blocked.</b> Every failed eligibility rule is listed below.</p>
+    <ul class="failed-rules">{% for reason in reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+  <form method="post">{% csrf_token %}
+    {% for error in form.non_field_errors %}<p class="error">{{ error }}</p>{% endfor %}
+    {% for field in form %}<label>{{ field.label }}{{ field }}{% for error in field.errors %}<span class="error">{{ error }}</span>{% endfor %}</label>{% endfor %}
+    <div class="form-actions"><a class="quiet" href="{% url cancel %}">Cancel</a><button class="primary"{% if not eligible %} disabled aria-disabled="true"{% endif %}>Confirm appointment</button></div>
+  </form>
+</section>
+</div>
+{% endblock %}

@@ -2405,3 +2405,52 @@ class ConfiguredEligibilityRuleTests(TestCase):
             "donation_type": DonationType.PLASMA, "volume_pls": 250,
         })
         self.assertEqual(Donation.objects.get().donation_type, DonationType.PLASMA)
+
+
+class FailedEligibilityDisplayTests(TestCase):
+    """BB-11 [FR-04] / TC-F02: every failed rule is shown and blocks appointment confirmation."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Show Branch", code="SHOW")
+        EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+        self.slot = AppointmentSlot.objects.create(
+            branch=self.branch, starts_at=timezone.now() + timedelta(days=2), capacity=5
+        )
+        self.user = User.objects.create_user("showdonor@bbms.test", email="showdonor@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.user, role=UserProfile.Role.DONOR, branch=self.branch)
+        self.donor = Donor.objects.create(
+            user=self.user, branch=self.branch, full_name="Show Donor", email="showdonor@bbms.test",
+            phone="9000000333", date_of_birth=EligibilityRuleUnitTests.birthday(17), weight_kg=45,
+            blood_group="B-", medical_history="Private cardiac note", consent_given=True,
+        )
+        self.client.force_login(self.user)
+        self.expected = ["Age must be between 18 and 65 years.", "Weight must be at least 50"]
+
+    def test_tc_f02_booking_page_lists_every_failed_rule(self):
+        response = self.client.get("/appointments/")
+        for reason in self.expected:
+            self.assertContains(response, reason)
+        self.assertContains(response, "disabled")
+        self.assertNotContains(response, "Private cardiac note")
+
+    def test_tc_f02_confirmation_is_blocked_and_audited(self):
+        response = self.client.post("/appointments/", {"slot": self.slot.pk})
+        self.assertContains(response, "Appointment blocked until every eligibility rule passes.")
+        for reason in self.expected:
+            self.assertContains(response, reason)
+        self.assertFalse(Appointment.objects.exists())
+        self.assertTrue(AuditEvent.objects.filter(event_type="APPOINTMENT_BLOCKED", outcome="REJECTED").exists())
+
+    def test_donor_record_page_shows_the_same_reasons(self):
+        response = self.client.get("/my-record/")
+        for reason in self.expected:
+            self.assertContains(response, reason)
+        self.assertNotContains(response, 'href="/appointments/"')
+
+    def test_eligible_donor_can_confirm(self):
+        self.donor.date_of_birth = EligibilityRuleUnitTests.birthday(30)
+        self.donor.weight_kg = 70
+        self.donor.save()
+        response = self.client.post("/appointments/", {"slot": self.slot.pk})
+        self.assertRedirects(response, "/my-record/")
+        self.assertEqual(Appointment.objects.get().donor, self.donor)
