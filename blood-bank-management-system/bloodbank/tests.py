@@ -1464,3 +1464,62 @@ class ReleaseAfterAcceptablePanelTests(ScreeningFixtureMixin, TestCase):
         self.assertFalse(LabResult.objects.filter(unit=unit).exists())
         unit.refresh_from_db()
         self.assertEqual(unit.status, BloodUnit.Status.COLLECTED)
+
+
+class QuarantineScreeningTests(ScreeningFixtureMixin, TestCase):
+    """BB-20 [FR-13] & TC-F07: Quarantine units with reactive, indeterminate or incomplete results."""
+
+    def test_tc_f07_each_non_acceptable_outcome_quarantines(self):
+        for bad in [LabResult.Outcome.REACTIVE, LabResult.Outcome.INDETERMINATE, LabResult.Outcome.INCOMPLETE]:
+            unit = self.make_unit()
+            record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
+            record_lab_result(unit, self.panel[1], bad, self.staff)
+            unit.refresh_from_db()
+            self.assertEqual(unit.status, BloodUnit.Status.QUARANTINED, bad)
+
+    def test_tc_f07_bad_last_result_of_a_complete_panel_quarantines(self):
+        for bad in [LabResult.Outcome.REACTIVE, LabResult.Outcome.INDETERMINATE, LabResult.Outcome.INCOMPLETE]:
+            unit = self.make_unit()
+            for test in self.panel[:-1]:
+                record_lab_result(unit, test, LabResult.Outcome.ACCEPTABLE, self.staff)
+            record_lab_result(unit, self.panel[-1], bad, self.staff)
+            unit.refresh_from_db()
+            self.assertEqual(unit.status, BloodUnit.Status.QUARANTINED, bad)
+
+    def test_tc_f07_missing_mandatory_result_at_release_quarantines(self):
+        unit = self.make_unit()
+        for test in self.panel[:-1]:
+            record_lab_result(unit, test, LabResult.Outcome.ACCEPTABLE, self.staff)
+        self.assertEqual(release_screened_unit(unit, self.staff), BloodUnit.Status.QUARANTINED)
+
+    def test_quarantined_units_never_appear_in_available_stock(self):
+        hospital = User.objects.create_user("qhosp@bbms.test", email="qhosp@bbms.test", password="pw")
+        UserProfile.objects.create(user=hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="QH")
+        unit = self.make_unit()
+        record_lab_result(unit, self.panel[0], LabResult.Outcome.REACTIVE, self.staff)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.QUARANTINED)
+
+        self.client.force_login(hospital)
+        for path in ["/", "/inventory/", "/api/v1/inventory/", "/reports/"]:
+            self.assertNotContains(self.client.get(path), unit.unit_id, msg_prefix=path)
+
+        self.client.force_login(self.staff)
+        self.assertEqual(self.client.get("/").context["available"], 0)
+
+        req = BloodRequest.objects.create(
+            hospital="QH",
+            created_by=hospital,
+            branch=self.branch,
+            blood_group="O+",
+            component="Packed Red Cells",
+            quantity=1,
+            priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1),
+            clinical_reference="REF-QUAR",
+            status=BloodRequest.Status.APPROVED,
+        )
+        with self.assertRaisesMessage(ValueError, "No compatible available units are available."):
+            reserve_units(req, self.staff)
+        with self.assertRaises(InvalidUnitTransition):
+            transition_unit(unit, BloodUnit.Status.AVAILABLE, self.staff)
