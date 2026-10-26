@@ -15,7 +15,7 @@ A Django academic implementation of the submitted Blood Bank Management System s
 
 ## Sprint demos
 
-- Sprint 1 (donor module: registration, eligibility, deferrals, appointments): [docs/videos/sprint1-donor-module-demo.mp4](../docs/videos/sprint1-donor-module-demo.mp4)
+- Sprint 1 (team demo: donor registration and booking, donation recording, screening and release, hospital request, reservation, cross-match and issue, audit trail): [docs/videos/sprint1-demo.mp4](../docs/videos/sprint1-demo.mp4)
 
 ## Local setup
 
