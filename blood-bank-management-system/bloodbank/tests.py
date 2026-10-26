@@ -1,5 +1,6 @@
 from datetime import timedelta
 import importlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -1523,3 +1524,113 @@ class QuarantineScreeningTests(ScreeningFixtureMixin, TestCase):
             reserve_units(req, self.staff)
         with self.assertRaises(InvalidUnitTransition):
             transition_unit(unit, BloodUnit.Status.AVAILABLE, self.staff)
+
+
+class ScheduledUnitExpiryTests(TestCase):
+    """BB-23 [FR-16] & TC-F08: Automatically mark unissued units Expired."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Expire Branch", code="EXPR")
+        self.staff = User.objects.create_user("expstaff@bbms.test", email="expstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.hospital = User.objects.create_user("exphosp@bbms.test", email="exphosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="Expire Hospital"
+        )
+        donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="Expire Donor",
+            email="expdonor@example.test",
+            phone="9000000106",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="A-",
+            consent_given=True,
+        )
+        self.donation = Donation.objects.create(
+            donation_id="DON-EXP-1", donor=donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+
+    def make_unit(self, unit_id, expiry_at, status=BloodUnit.Status.AVAILABLE):
+        return BloodUnit.objects.create(
+            unit_id=unit_id,
+            donation=self.donation,
+            blood_group="A-",
+            component="Platelets",
+            volume_ml=50,
+            expiry_at=expiry_at,
+            branch=self.branch,
+            status=status,
+        )
+
+    def make_request(self, ref):
+        return BloodRequest.objects.create(
+            hospital="Expire Hospital",
+            created_by=self.hospital,
+            branch=self.branch,
+            blood_group="A-",
+            component="Platelets",
+            quantity=1,
+            priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1),
+            clinical_reference=ref,
+            status=BloodRequest.Status.APPROVED,
+        )
+
+    def test_tc_f08_command_expires_only_units_past_expiry(self):
+        just_before = self.make_unit("UNIT-JUST-BEFORE", timezone.now() + timedelta(minutes=5))
+        after = self.make_unit("UNIT-AFTER", timezone.now() - timedelta(minutes=1))
+        quarantined = self.make_unit("UNIT-OLD-QUAR", timezone.now() - timedelta(days=1), BloodUnit.Status.QUARANTINED)
+        issued = self.make_unit("UNIT-OLD-ISSUED", timezone.now() - timedelta(days=1), BloodUnit.Status.ISSUED)
+        out = StringIO()
+        call_command("expire_units", stdout=out)
+        self.assertIn("1 unit(s) marked Expired", out.getvalue())
+        for unit, status in [
+            (just_before, BloodUnit.Status.AVAILABLE),
+            (after, BloodUnit.Status.EXPIRED),
+            (quarantined, BloodUnit.Status.QUARANTINED),
+            (issued, BloodUnit.Status.ISSUED),
+        ]:
+            unit.refresh_from_db()
+            self.assertEqual(unit.status, status, unit.unit_id)
+
+        out = StringIO()
+        call_command("expire_units", stdout=out)
+        self.assertIn("0 unit(s) marked Expired", out.getvalue())
+
+    def test_command_runs_without_any_page_load(self):
+        unit = self.make_unit("UNIT-NO-PAGE", timezone.now() - timedelta(minutes=1))
+        call_command("expire_units", stdout=StringIO())
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.EXPIRED)
+        self.assertTrue(AuditEvent.objects.filter(event_type="UNIT_EXPIRED", record_id=str(unit.pk), actor=None).exists())
+
+    def test_tc_f08_expired_reserved_unit_releases_its_reservation(self):
+        unit = self.make_unit("UNIT-RES-EXP", timezone.now() + timedelta(hours=1))
+        req = self.make_request("REF-EXP-RES")
+        reservation = reserve_units(req, self.staff)[0]
+        BloodUnit.objects.filter(pk=unit.pk).update(expiry_at=timezone.now() - timedelta(minutes=1))
+        call_command("expire_units", stdout=StringIO())
+        reservation.refresh_from_db()
+        unit.refresh_from_db()
+        self.assertFalse(reservation.active)
+        self.assertEqual(unit.status, BloodUnit.Status.EXPIRED)
+        self.assertTrue(AuditEvent.objects.filter(event_type="RESERVATION_RELEASED", record_id=str(unit.pk)).exists())
+
+        # The request is free to reserve a replacement unit.
+        replacement = self.make_unit("UNIT-REPLACEMENT", timezone.now() + timedelta(days=3))
+        self.assertEqual(reserve_units(req, self.staff)[0].unit, replacement)
+
+    def test_tc_f08_expired_units_excluded_from_search_and_reservation(self):
+        self.make_unit("UNIT-STALE", timezone.now() - timedelta(minutes=1))
+        call_command("expire_units", stdout=StringIO())
+        self.client.force_login(self.hospital)
+        self.assertNotContains(self.client.get("/inventory/"), "UNIT-STALE")
+        self.assertEqual(self.client.get("/api/v1/inventory/").json()["items"], [])
+        with self.assertRaisesMessage(ValueError, "No compatible available units are available."):
+            reserve_units(self.make_request("REF-STALE"), self.staff)
+
+    def test_scheduler_service_runs_the_command_on_a_schedule(self):
+        compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()
+        self.assertIn("scheduler:", compose)
+        self.assertIn("python manage.py expire_units --every 300", compose)

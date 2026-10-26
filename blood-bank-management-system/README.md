@@ -38,6 +38,10 @@ python3 manage.py test bloodbank
 python3 manage.py check
 ```
 
+## Scheduled unit expiry
+
+`python3 manage.py expire_units` marks every unissued unit past its expiry time as Expired, releases any reservation it held and audits each change. In `docker-compose.yml` the `scheduler` service runs it every 5 minutes (`expire_units --every 300`). For a local install, run it from cron, for example `*/5 * * * * python3 manage.py expire_units`, or from Windows Task Scheduler. Inventory, dashboard and reservation still call the same check, so pages stay correct between runs.
+
 ## Deployment truthfulness
 
 `docker-compose.yml` specifies the documented PostgreSQL and Gunicorn deployment shape. It is a deployment template, not evidence that a production container, HTTPS reverse proxy, backup schedule, 100-user load test, browser compatibility matrix, or institutional compliance review has been executed. Before a real deployment, set a strong `BBMS_SECRET_KEY`, set `BBMS_DEBUG=0`, enable TLS and `BBMS_SECURE_SSL=1`, change all demo credentials, configure authenticated SMTP, configure encrypted backup storage/retention, and execute the complete acceptance test plan.

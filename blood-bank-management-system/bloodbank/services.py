@@ -352,6 +352,7 @@ def release_screened_unit(unit, user):
 
 
 def expire_units():
+    """FR-16: mark unissued units past expiry as Expired; an expired reserved unit releases its reservation."""
     now = timezone.now()
     expired_qs = BloodUnit.objects.filter(
         status__in=[BloodUnit.Status.AVAILABLE, BloodUnit.Status.RESERVED],
@@ -362,6 +363,16 @@ def expire_units():
     count = 0
     with transaction.atomic():
         for unit in expired_qs.select_for_update().select_related("branch"):
+            for res in unit.reservations.select_for_update().filter(active=True):
+                res.active = False
+                res.save(update_fields=["active"])
+                audit(
+                    None,
+                    "RESERVATION_RELEASED",
+                    unit,
+                    summary=f"Request {res.request_id}: reserved unit expired",
+                    branch=unit.branch,
+                )
             transition_unit(unit, BloodUnit.Status.EXPIRED, None, reason="Expiry time reached", event_type="UNIT_EXPIRED")
             count += 1
     return count

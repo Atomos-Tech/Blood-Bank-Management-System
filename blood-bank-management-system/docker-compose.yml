@@ -18,6 +18,19 @@ services:
       BBMS_SECURE_SSL: "1"
       BBMS_DEBUG: "0"
     depends_on: [db]
+  scheduler:
+    # Scheduled tasks share the application code but run as a separate process (SADS 3.4).
+    build: .
+    command: python manage.py expire_units --every 300
+    environment:
+      BBMS_DB_ENGINE: postgresql
+      POSTGRES_DB: bbms
+      POSTGRES_USER: bbms
+      POSTGRES_PASSWORD: change-before-deployment
+      POSTGRES_HOST: db
+      BBMS_DEBUG: "0"
+    depends_on: [db]
+    restart: unless-stopped
   nginx:
     image: nginx:1.27-alpine
     ports:
