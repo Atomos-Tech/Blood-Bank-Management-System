@@ -944,3 +944,61 @@ class SADSInventoryAndRequestAPITests(TestCase):
         self.assertEqual(issue_ok.status_code, 201)
         self.assertEqual(issue_ok.json()["unit_status"], "ISSUED")
         self.assertEqual(issue_ok.json()["request_status"], "FULFILLED")
+
+
+class DonationCollectionDetailsTests(TestCase):
+    """BB-17 [FR-10] & TC-F06: Record collection details for each blood unit."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Collection Branch", code="COLL")
+        ShelfLifeRule.objects.create(component="Packed Red Cells", days=35)
+        self.staff = User.objects.create_user("collector@bbms.test", email="collector@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="Collection Donor",
+            email="collection@example.test",
+            phone="9000000101",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="A+",
+            consent_given=True,
+        )
+        self.valid_post = {
+            "donor": self.donor.pk,
+            "branch": self.branch.pk,
+            "blood_group": "A+",
+            "component": "Packed Red Cells",
+            "volume_ml": 350,
+        }
+
+    def test_tc_f06_all_collection_fields_stored_and_collector_is_logged_in_staff(self):
+        self.client.force_login(self.staff)
+        before = timezone.now()
+        resp = self.client.post("/donations/new/", self.valid_post)
+        self.assertEqual(resp.status_code, 302)
+
+        unit = BloodUnit.objects.select_related("donation__donor", "donation__collector").get()
+        self.assertGreaterEqual(unit.donation.collected_at, before)
+        self.assertEqual(unit.volume_ml, 350)
+        self.assertEqual(unit.blood_group, "A+")
+        self.assertEqual(unit.component, "Packed Red Cells")
+        self.assertEqual(unit.donation.collector, self.staff)
+        self.assertEqual(unit.donation.donor, self.donor)
+        self.assertEqual(unit.status, BloodUnit.Status.COLLECTED)
+
+    def test_tc_f06_each_mandatory_field_is_required(self):
+        self.client.force_login(self.staff)
+        for field in ["donor", "branch", "blood_group", "component", "volume_ml"]:
+            data = {k: v for k, v in self.valid_post.items() if k != field}
+            resp = self.client.post("/donations/new/", data)
+            self.assertEqual(resp.status_code, 200, field)
+            self.assertIn(field, resp.context["form"].errors)
+        self.assertEqual(Donation.objects.count(), 0)
+        self.assertEqual(BloodUnit.objects.count(), 0)
+
+    def test_tc_f06_collector_cannot_be_spoofed_from_the_form(self):
+        other = User.objects.create_user("other@bbms.test", email="other@bbms.test", password="pw")
+        self.client.force_login(self.staff)
+        self.client.post("/donations/new/", dict(self.valid_post, collector=other.pk))
+        self.assertEqual(Donation.objects.get().collector, self.staff)
