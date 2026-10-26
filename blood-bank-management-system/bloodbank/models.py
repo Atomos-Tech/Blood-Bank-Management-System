@@ -170,6 +170,7 @@ class BloodUnit(models.Model):
 class TestType(models.Model):
     name = models.CharField(max_length=64, unique=True)
     required = models.BooleanField(default=True)
+    def __str__(self): return self.name
 
 class LabResult(models.Model):
     class Outcome(models.TextChoices): ACCEPTABLE="ACCEPTABLE","Acceptable"; REACTIVE="REACTIVE","Reactive"; INDETERMINATE="INDETERMINATE","Indeterminate"; INCOMPLETE="INCOMPLETE","Incomplete"
