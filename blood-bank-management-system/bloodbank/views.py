@@ -349,20 +349,18 @@ def deferral_view(request):
     if not allowed(request.user, STAFF):
         return deny(request.user)
     ub = user_branch(request.user)
-    form = DeferralForm(request.POST or None)
+    form = DeferralForm(request.POST or None, branch=ub)
     if request.method == "POST" and form.is_valid():
         d = form.save(commit=False)
         if d.donor.branch_id and not in_branch_scope(request.user, d.donor.branch_id):
             return deny(request.user, "Cross-branch deferral denied")
-        d.approved_by = request.user
-        if not d.permanent and not d.end_date:
-            form.add_error("end_date", "Temporary deferrals require an end date.")
-        else:
-            d.save()
-            audit(request.user, "DEFERRAL_RECORDED", d, branch=d.donor.branch or ub)
-            messages.success(request, "Deferral recorded.")
-            return redirect("deferrals")
-    items = Deferral.objects.select_related("donor", "approved_by")
+        d.approved_by = request.user  # FR-08: approving staff comes from the session, never the form
+        d.save()
+        kind = "Permanent" if d.permanent else f"Temporary until {d.end_date}"
+        audit(request.user, "DEFERRAL_RECORDED", d, summary=f"{kind}: {d.reason}", branch=d.donor.branch or ub)
+        messages.success(request, "Deferral recorded.")
+        return redirect("deferrals")
+    items = Deferral.objects.select_related("donor", "approved_by").order_by("-start_date", "-pk")
     if ub:
         items = items.filter(Q(donor__branch=ub) | Q(donor__branch__isnull=True))
     return render(request, "bloodbank/deferrals.html", {"form": form, "items": items})

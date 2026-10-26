@@ -1,6 +1,7 @@
 import re
 
 from django import forms
+from django.db import models
 from django.utils import timezone
 from .models import (BLOOD_GROUPS, COMPONENT_CODES, DonationType, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
                      LabResult, Reservation)
@@ -112,9 +113,37 @@ class AppointmentForm(forms.Form):
 
 
 class DeferralForm(forms.ModelForm):
+    """FR-08: reason, start date and (for temporary deferrals) end date; the approver is set by the view."""
+
     class Meta:
         model = Deferral
         fields = ["donor", "reason", "permanent", "start_date", "end_date"]
+        widgets = {"start_date": forms.DateInput(attrs={"type": "date"}), "end_date": forms.DateInput(attrs={"type": "date"})}
+        labels = {"permanent": "Permanent deferral"}
+
+    def __init__(self, *args, branch=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        donors = Donor.objects.order_by("full_name")
+        if branch is not None:
+            donors = donors.filter(models.Q(branch=branch) | models.Q(branch__isnull=True))
+        self.fields["donor"].queryset = donors
+
+    def clean_reason(self):
+        reason = (self.cleaned_data.get("reason") or "").strip()
+        if not reason:
+            raise forms.ValidationError("A deferral reason is required.")
+        return reason
+
+    def clean(self):
+        cleaned = super().clean()
+        permanent, start, end = cleaned.get("permanent"), cleaned.get("start_date"), cleaned.get("end_date")
+        if permanent:
+            cleaned["end_date"] = None  # permanent deferrals never end
+        elif not end:
+            self.add_error("end_date", "Temporary deferrals require an end date.")
+        elif start and end < start:
+            self.add_error("end_date", "End date cannot be before the start date.")
+        return cleaned
 
 
 class BloodRequestForm(forms.ModelForm):

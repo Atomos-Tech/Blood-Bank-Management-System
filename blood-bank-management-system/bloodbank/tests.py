@@ -2454,3 +2454,75 @@ class FailedEligibilityDisplayTests(TestCase):
         response = self.client.post("/appointments/", {"slot": self.slot.pk})
         self.assertRedirects(response, "/my-record/")
         self.assertEqual(Appointment.objects.get().donor, self.donor)
+
+
+class DonorDeferralTests(TestCase):
+    """BB-15 [FR-08] / TC-F05: staff record temporary or permanent deferrals that block eligibility."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Defer Branch", code="DEF")
+        EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+        self.staff = User.objects.create_user("defstaff@bbms.test", email="defstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.other = User.objects.create_user("other@bbms.test", email="other@bbms.test", password="pw")
+        self.donor = Donor.objects.create(
+            branch=self.branch, full_name="Defer Donor", email="defer@example.test", phone="9000000444",
+            date_of_birth=EligibilityRuleUnitTests.birthday(28), weight_kg=65, blood_group="AB+", consent_given=True,
+        )
+        self.client.force_login(self.staff)
+        self.today = timezone.localdate()
+
+    def post(self, **data):
+        payload = {"donor": self.donor.pk, "reason": "Low haemoglobin", "start_date": self.today.isoformat()}
+        payload.update(data)
+        return self.client.post("/deferrals/", {k: v for k, v in payload.items() if v is not None})
+
+    def test_tc_f05_temporary_deferral_stored_with_staff_identity_and_blocks(self):
+        self.assertTrue(eligibility(self.donor)[0])
+        response = self.post(end_date=(self.today + timedelta(days=30)).isoformat(), approved_by=self.other.pk)
+        self.assertRedirects(response, "/deferrals/")
+        deferral = Deferral.objects.get()
+        self.assertEqual(deferral.approved_by, self.staff)
+        self.assertFalse(deferral.permanent)
+        self.assertIn("An active donor deferral applies.", eligibility(self.donor)[1])
+        event = AuditEvent.objects.get(event_type="DEFERRAL_RECORDED")
+        self.assertEqual(event.record_id, str(deferral.pk))
+        self.assertIn("Temporary until", event.summary)
+
+    def test_tc_f05_permanent_deferral_needs_no_end_date(self):
+        response = self.post(permanent="on", reason="Positive HIV confirmatory test")
+        self.assertRedirects(response, "/deferrals/")
+        deferral = Deferral.objects.get()
+        self.assertTrue(deferral.permanent)
+        self.assertIsNone(deferral.end_date)
+        self.assertFalse(eligibility(self.donor)[0])
+
+    def test_tc_f05_temporary_deferral_without_end_date_is_rejected(self):
+        response = self.post()
+        self.assertContains(response, "Temporary deferrals require an end date.")
+        self.assertFalse(Deferral.objects.exists())
+        self.assertTrue(eligibility(self.donor)[0])
+
+    def test_end_date_before_start_and_blank_reason_are_rejected(self):
+        response = self.post(end_date=(self.today - timedelta(days=1)).isoformat())
+        self.assertContains(response, "End date cannot be before the start date.")
+        response = self.post(reason="   ", end_date=(self.today + timedelta(days=5)).isoformat())
+        self.assertContains(response, "This field is required.")
+        self.assertFalse(Deferral.objects.exists())
+
+    def test_ended_deferral_no_longer_blocks(self):
+        Deferral.objects.create(
+            donor=self.donor, reason="Travel", start_date=self.today - timedelta(days=40),
+            end_date=self.today - timedelta(days=1), approved_by=self.staff,
+        )
+        self.assertTrue(eligibility(self.donor)[0])
+
+    def test_donor_choices_are_limited_to_staff_branch(self):
+        other_branch = Branch.objects.create(name="Elsewhere", code="ELSE")
+        outsider = Donor.objects.create(
+            branch=other_branch, full_name="Outside Donor", email="out@example.test", phone="9000000555",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="O-", consent_given=True,
+        )
+        response = self.client.get("/deferrals/")
+        self.assertContains(response, "Defer Donor")
+        self.assertNotContains(response, outsider.full_name)
