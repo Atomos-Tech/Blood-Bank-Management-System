@@ -16,8 +16,9 @@ urlpatterns = [
     path("inventory/<int:pk>/release/", views.release_view, name="release"),
     path("inventory/<int:pk>/discard/", views.discard_view, name="discard"),
     path("requests/", views.request_list, name="requests"),
-    path("requests/<int:pk>/<str:action>/", views.request_action, name="request_action"),
+    # The specific reserve route must come before the generic action route, which would otherwise capture it.
     path("requests/<int:pk>/reserve/", views.reserve_view, name="reserve"),
+    path("requests/<int:pk>/<str:action>/", views.request_action, name="request_action"),
     path("reservations/<int:pk>/release/", views.release_reservation_view, name="release_reservation"),
     path("reservations/<int:pk>/crossmatch/", views.crossmatch_view, name="crossmatch"),
     path("reservations/<int:pk>/issue/", views.issue_view, name="issue"),

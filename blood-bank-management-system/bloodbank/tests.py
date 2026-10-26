@@ -1743,3 +1743,189 @@ class AuditRecordImmutabilityTests(TestCase):
         event = AuditEvent.objects.get(event_type="TEST_EVENT")
         self.client.force_login(self.staff)
         self.assertContains(self.client.get("/audit/"), f"{event.created_at:%Y-%m-%d %H:%M:%S} UTC")
+
+
+class RolePermissionMatrixTests(TestCase):
+    """BB-50 [SEC-01] & TC-S02: Server-side authorization on every protected action (SRS 6.3, Table 4)."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Matrix Branch", code="MTX")
+        self.other_branch = Branch.objects.create(name="Other Branch", code="OTH")
+        ShelfLifeRule.objects.create(component="Plasma", days=365)
+        TestType.objects.create(name="HIV", required=True)
+        EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+
+        def make_user(name, role, branch=None, **profile):
+            user = User.objects.create_user(f"{name}@bbms.test", email=f"{name}@bbms.test", password="pw")
+            UserProfile.objects.create(user=user, role=role, branch=branch or self.branch, **profile)
+            return user
+
+        self.users = {
+            "DONOR": make_user("mx_donor", UserProfile.Role.DONOR),
+            "STAFF": make_user("mx_staff", UserProfile.Role.STAFF),
+            "HOSPITAL": make_user("mx_hosp", UserProfile.Role.HOSPITAL, hospital_name="Matrix Hospital"),
+            "ADMIN": make_user("mx_admin", UserProfile.Role.ADMIN),
+        }
+        self.other_staff = make_user("mx_other_staff", UserProfile.Role.STAFF, branch=self.other_branch)
+        staff, hospital = self.users["STAFF"], self.users["HOSPITAL"]
+
+        self.donor = Donor.objects.create(
+            user=self.users["DONOR"],
+            branch=self.branch,
+            full_name="Matrix Donor",
+            email="mx_donor@bbms.test",
+            phone="9000000108",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="O+",
+            consent_given=True,
+        )
+        slot = AppointmentSlot.objects.create(branch=self.branch, starts_at=timezone.now() + timedelta(days=2), capacity=5)
+        self.appointment = Appointment.objects.create(donor=self.donor, slot=slot)
+        donation = Donation.objects.create(
+            donation_id="DON-MTX-1", donor=self.donor, collected_at=timezone.now(), collector=staff, branch=self.branch
+        )
+
+        def unit(unit_id, status):
+            return BloodUnit.objects.create(
+                unit_id=unit_id,
+                donation=donation,
+                blood_group="O+",
+                component="Plasma",
+                volume_ml=220,
+                expiry_at=timezone.now() + timedelta(days=30),
+                branch=self.branch,
+                status=status,
+            )
+
+        self.collected = unit("UNIT-MTX-COLL", BloodUnit.Status.COLLECTED)
+        self.quarantined = unit("UNIT-MTX-QUAR", BloodUnit.Status.QUARANTINED)
+        unit("UNIT-MTX-RES", BloodUnit.Status.AVAILABLE)
+        unit("UNIT-MTX-SPARE", BloodUnit.Status.AVAILABLE)
+
+        def request(ref, status):
+            return BloodRequest.objects.create(
+                hospital="Matrix Hospital",
+                created_by=hospital,
+                branch=self.branch,
+                blood_group="O+",
+                component="Plasma",
+                quantity=1,
+                priority="Urgent",
+                required_by=timezone.now() + timedelta(days=1),
+                clinical_reference=ref,
+                status=status,
+            )
+
+        self.pending = request("REF-MTX-PEND", BloodRequest.Status.PENDING)
+        reserved_req = request("REF-MTX-RES", BloodRequest.Status.APPROVED)
+        self.reservation = reserve_units(reserved_req, staff)[0]
+        self.approved = request("REF-MTX-APPR", BloodRequest.Status.APPROVED)
+
+    def matrix(self):
+        """(method, path, data, roles allowed by SRS Table 4)."""
+        S, H, D, A = "STAFF", "HOSPITAL", "DONOR", "ADMIN"
+        new_request = json.dumps({
+            "branch": self.branch.pk,
+            "blood_group": "O+",
+            "component": "Plasma",
+            "quantity": 1,
+            "priority": "Urgent",
+            "required_by": (timezone.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "clinical_reference": "REF-MTX-API",
+        })
+        return [
+            ("get", "/", None, {S, H, D, A}),
+            ("get", "/my-record/", None, {D}),
+            ("get", f"/appointments/?donor={self.donor.pk}", None, {D, S}),
+            ("post", f"/appointments/{self.appointment.pk}/cancel/", {}, {D, S}),
+            ("get", "/donors/", None, {S}),
+            ("get", "/deferrals/", None, {S}),
+            ("get", "/donations/new/", None, {S}),
+            ("get", f"/inventory/{self.collected.pk}/screen/", None, {S}),
+            ("post", f"/inventory/{self.collected.pk}/release/", {}, {S}),
+            ("post", f"/inventory/{self.quarantined.pk}/discard/", {"reason": "Reactive"}, {S}),
+            ("get", "/inventory/", None, {S, H, A}),
+            ("get", "/api/v1/inventory/", None, {S, H, A}),
+            ("get", "/requests/", None, {S, H}),
+            ("post", f"/requests/{self.pending.pk}/approve/", {}, {S}),
+            ("post", f"/requests/{self.pending.pk}/reject/", {}, {S}),
+            ("post", f"/requests/{self.pending.pk}/cancel/", {}, {S, H}),
+            ("post", f"/requests/{self.approved.pk}/reserve/", {}, {S}),
+            ("get", f"/reservations/{self.reservation.pk}/crossmatch/", None, {S}),
+            ("post", f"/reservations/{self.reservation.pk}/issue/", {}, {S}),
+            ("post", f"/reservations/{self.reservation.pk}/release/", {}, {S}),
+            ("get", "/audit/", None, {S, A}),
+            ("get", "/reports/", None, {S, H, A}),
+            ("post_json", "/api/v1/requests", new_request, {H}),
+            ("patch_json", f"/api/v1/requests/{self.pending.pk}/status", json.dumps({"status": "APPROVED"}), {S}),
+            ("post_json", f"/api/v1/requests/{self.approved.pk}/reserve", "{}", {S}),
+            ("post_json", "/api/v1/issues", json.dumps({"reservation_id": self.reservation.pk}), {S}),
+        ]
+
+    def call(self, method, path, data):
+        if method == "get":
+            return self.client.get(path)
+        if method == "post":
+            return self.client.post(path, data)
+        if method == "post_json":
+            return self.client.post(path, data, content_type="application/json")
+        return self.client.patch(path, data, content_type="application/json")
+
+    def test_tc_s02_every_role_against_every_protected_url(self):
+        from django.db import transaction
+        for role_name, user in self.users.items():
+            self.client.force_login(user)  # outside the rolled-back block so the session row survives
+            for method, path, data, allowed_roles in self.matrix():
+                with self.subTest(role=role_name, path=path, method=method), transaction.atomic():
+                    denials_before = AuditEvent.objects.filter(actor=user, event_type="UNAUTHORIZED_ACCESS").count()
+                    resp = self.call(method, path, data)
+                    denials = AuditEvent.objects.filter(actor=user, event_type="UNAUTHORIZED_ACCESS").count() - denials_before
+                    if role_name in allowed_roles:
+                        self.assertNotEqual(resp.status_code, 403)
+                        self.assertNotIn("/login/", resp.get("Location", ""))
+                        self.assertEqual(denials, 0)
+                    else:
+                        self.assertEqual(resp.status_code, 403)
+                        self.assertEqual(denials, 1, "denied attempt must be audited")
+                    transaction.set_rollback(True)
+
+    def test_tc_s02_anonymous_requests_are_sent_to_login(self):
+        for method, path, data, _ in self.matrix():
+            with self.subTest(path=path, method=method):
+                resp = self.call(method, path, data)
+                self.assertEqual(resp.status_code, 302)
+                self.assertIn("/login/", resp["Location"])
+
+    def test_tc_s02_out_of_scope_branch_actions_are_denied_and_logged(self):
+        self.client.force_login(self.other_staff)
+        for method, path, data in [
+            ("post", f"/requests/{self.pending.pk}/approve/", {}),
+            ("post", f"/inventory/{self.quarantined.pk}/discard/", {"reason": "x"}),
+            ("post", f"/inventory/{self.collected.pk}/release/", {}),
+            ("post", f"/reservations/{self.reservation.pk}/issue/", {}),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(self.call(method, path, data).status_code, 403)
+        self.assertEqual(
+            AuditEvent.objects.filter(actor=self.other_staff, event_type="UNAUTHORIZED_ACCESS", outcome="DENIED").count(), 4
+        )
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, BloodRequest.Status.PENDING)
+
+    def test_superuser_flag_does_not_bypass_the_role_matrix(self):
+        self.users["ADMIN"].is_superuser = True
+        self.users["ADMIN"].is_staff = True
+        self.users["ADMIN"].save()
+        self.client.force_login(self.users["ADMIN"])
+        self.assertEqual(self.client.post(f"/requests/{self.pending.pk}/approve/").status_code, 403)
+        self.assertEqual(self.client.get("/donors/").status_code, 403)
+        self.assertEqual(self.client.get("/audit/").status_code, 200)
+
+    def test_deactivated_account_is_denied_everywhere(self):
+        staff = self.users["STAFF"]
+        staff.profile.active = False
+        staff.profile.save()
+        self.client.force_login(staff)
+        self.assertEqual(self.client.get("/inventory/").status_code, 403)
+        self.assertEqual(self.client.post(f"/requests/{self.pending.pk}/approve/").status_code, 403)

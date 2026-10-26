@@ -22,12 +22,23 @@ from .services import (DuplicateLabResult, audit, check_stock_and_expiry_alerts,
                        get_branch_warnings, issue_reservation, notify, release_reservation,
                        release_screened_unit, reserve_units, transition_request)
 
-STAFF = {UserProfile.Role.STAFF, UserProfile.Role.ADMIN}
+# SEC-01: server-side role sets taken from the SRS 6.3 role-permission matrix (Table 4).
+# Blood bank staff run branch operations; the administrator has oversight (inventory view, reports, audit)
+# and configuration through Django admin, but no routine clinical actions.
+STAFF = {UserProfile.Role.STAFF}
 ADMIN = {UserProfile.Role.ADMIN}
+OVERSIGHT = {UserProfile.Role.STAFF, UserProfile.Role.ADMIN}
+STOCK_VIEWERS = {UserProfile.Role.STAFF, UserProfile.Role.ADMIN, UserProfile.Role.HOSPITAL}
+REQUEST_USERS = {UserProfile.Role.STAFF, UserProfile.Role.HOSPITAL}
 
 
 def role(user):
-    return getattr(user.profile, "role", None) if user.is_authenticated and hasattr(user, "profile") else None
+    if not user.is_authenticated:
+        return None
+    if hasattr(user, "profile"):
+        return user.profile.role
+    # A Django superuser created without an application profile acts as the System Administrator.
+    return UserProfile.Role.ADMIN if user.is_superuser else None
 
 
 def allowed(user, roles):
@@ -35,11 +46,11 @@ def allowed(user, roles):
         return False
     if hasattr(user, "profile") and not user.profile.active:
         return False
-    return user.is_superuser or role(user) in roles
+    return role(user) in roles
 
 
 def user_branch(user):
-    if not user.is_authenticated or user.is_superuser or not hasattr(user, "profile"):
+    if not user.is_authenticated or not hasattr(user, "profile"):
         return None
     if user.profile.role in {UserProfile.Role.STAFF, UserProfile.Role.HOSPITAL}:
         return user.profile.branch
@@ -47,7 +58,7 @@ def user_branch(user):
 
 
 def in_branch_scope(user, target_branch):
-    if user.is_superuser or role(user) == UserProfile.Role.ADMIN:
+    if role(user) == UserProfile.Role.ADMIN:
         return True
     ub = user_branch(user)
     if ub is None or target_branch is None:
@@ -207,7 +218,7 @@ def dashboard(request):
         "available": units.filter(status=BloodUnit.Status.AVAILABLE, expiry_at__gt=timezone.now()).count(),
         "testing": units.filter(status=BloodUnit.Status.TESTING).count(),
         "active_requests": requests_qs.count(),
-        "activity": audit_qs[:8] if allowed(request.user, STAFF) else [],
+        "activity": audit_qs[:8] if allowed(request.user, OVERSIGHT) else [],
         "low_stock_warnings": warnings["low_stock"],
         "near_expiry_warnings": warnings["near_expiry"],
     }
@@ -242,7 +253,7 @@ def donor_list(request):
 
 @login_required
 def my_donor_record(request):
-    if role(request.user) != UserProfile.Role.DONOR and not request.user.is_superuser:
+    if role(request.user) != UserProfile.Role.DONOR:
         return deny(request.user)
     donor_param = request.GET.get("donor")
     donor = get_object_or_404(Donor, user=request.user)
@@ -351,7 +362,7 @@ def deferral_view(request):
 @login_required
 @require_http_methods(["GET", "POST"])
 def inventory(request):
-    if not allowed(request.user, {UserProfile.Role.STAFF, UserProfile.Role.ADMIN, UserProfile.Role.HOSPITAL}):
+    if not allowed(request.user, STOCK_VIEWERS):
         return deny(request.user)
     expire_units()
     ub = user_branch(request.user)
@@ -485,7 +496,7 @@ def discard_view(request, pk):
 @login_required
 @require_http_methods(["GET", "POST"])
 def request_list(request):
-    if not allowed(request.user, {UserProfile.Role.STAFF, UserProfile.Role.ADMIN, UserProfile.Role.HOSPITAL}):
+    if not allowed(request.user, REQUEST_USERS):
         return deny(request.user)
     ub = user_branch(request.user)
     req_branch = request.GET.get("branch")
@@ -554,7 +565,7 @@ def request_action(request, pk, action):
             "reject": BloodRequest.Status.REJECTED,
         }.get(action)
         if not target:
-            return HttpResponseForbidden("Unsupported action")
+            return deny(request.user, f"Unsupported request action {action}")
         try:
             transition_request(r, target, request.user)
         except ValueError as e:
@@ -632,7 +643,7 @@ def issue_view(request, pk):
 @login_required
 @require_http_methods(["GET"])
 def audit_view(request):
-    if not allowed(request.user, STAFF):
+    if not allowed(request.user, OVERSIGHT):
         return deny(request.user)
     ub = user_branch(request.user)
     req_branch = request.GET.get("branch")
@@ -648,7 +659,7 @@ def audit_view(request):
 
 @login_required
 def reports(request):
-    if not allowed(request.user, {UserProfile.Role.STAFF, UserProfile.Role.ADMIN, UserProfile.Role.HOSPITAL}):
+    if not allowed(request.user, STOCK_VIEWERS):
         return deny(request.user)
     expire_units()
     ub = user_branch(request.user)
@@ -701,7 +712,7 @@ def reports(request):
 @login_required
 @require_http_methods(["GET"])
 def api_inventory(request):
-    if not allowed(request.user, {UserProfile.Role.STAFF, UserProfile.Role.ADMIN, UserProfile.Role.HOSPITAL}):
+    if not allowed(request.user, STOCK_VIEWERS):
         deny(request.user)
         return api_error("forbidden", "Not authorized", status=403)
     expire_units()
@@ -740,7 +751,7 @@ def api_inventory(request):
 @require_http_methods(["POST"])
 def api_create_request(request):
     """POST /api/v1/requests — Hospital Staff create a blood request (SADS 8.2, FR-19, UC-04)."""
-    if role(request.user) != UserProfile.Role.HOSPITAL and not request.user.is_superuser:
+    if not allowed(request.user, {UserProfile.Role.HOSPITAL}):
         deny(request.user, "Non-hospital user attempted POST /api/v1/requests")
         return api_error("forbidden", "Only hospital staff can submit blood requests.", status=403)
     data = _parse_payload(request)
