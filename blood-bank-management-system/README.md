@@ -38,6 +38,19 @@ python3 manage.py test bloodbank
 python3 manage.py check
 ```
 
+## Module structure
+
+The app follows the layered modular monolith in SADS section 3. Views call services, services apply the business rules, and models handle data access.
+
+| Layer | Files | Responsibility |
+| :--- | :--- | :--- |
+| Presentation | `bloodbank/views.py`, `bloodbank/forms.py`, `bloodbank/templates/`, `bloodbank/urls.py` | HTTP handling, form validation, role and branch checks, role-specific pages and JSON API |
+| Business rules | `bloodbank/services.py` | Eligibility, donation recording and unit IDs, shelf-life expiry, the unit state machine (`transition_unit`), screening release and quarantine, request state machine, reservation, cross-match and issue, alerts, audit and notifications |
+| Data access | `bloodbank/models.py`, `bloodbank/migrations/` | Django models, constraints, indexes and the append-only audit trail |
+| Infrastructure | `bloodbank/middleware.py`, `bloodbank/management/commands/`, `bbms/settings.py`, `docker-compose.yml`, `nginx.conf` | Branch time zones, scheduled jobs (`expire_units`, `check_alerts`), demo seeding, deployment |
+
+`bloodbank/tests.py` holds unit tests for the eligibility rules, every unit and request state transition and the screening outcomes, plus integration tests for each Test Plan case (`TC-F..`, `TC-S..`, `TC-N..`) named in the test class docstrings.
+
 ## Scheduled unit expiry
 
 `python3 manage.py expire_units` marks every unissued unit past its expiry time as Expired, releases any reservation it held and audits each change. In `docker-compose.yml` the `scheduler` service runs it every 5 minutes (`expire_units --every 300`). For a local install, run it from cron, for example `*/5 * * * * python3 manage.py expire_units`, or from Windows Task Scheduler. Inventory, dashboard and reservation still call the same check, so pages stay correct between runs.

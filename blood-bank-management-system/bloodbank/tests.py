@@ -2029,3 +2029,185 @@ class BranchTimezoneDisplayTests(TestCase):
         self.client.force_login(self.staff_kol)
         self.client.get("/inventory/")
         self.assertEqual(timezone.get_current_timezone_name(), "UTC")
+
+
+class EligibilityRuleUnitTests(TestCase):
+    """BB-45 [NFR-08]: unit tests for the eligibility service (FR-03, FR-04)."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Eligibility Branch", code="ELIG")
+        self.staff = User.objects.create_user("eligstaff@bbms.test", email="eligstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.rule = EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+        self.donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="Eligible Donor",
+            email="eligible@example.test",
+            phone="9000000110",
+            date_of_birth=self.birthday(30),
+            weight_kg=60,
+            blood_group="O+",
+            consent_given=True,
+        )
+
+    @staticmethod
+    def birthday(age, days_offset=0):
+        today = timezone.localdate()
+        try:
+            dob = today.replace(year=today.year - age)
+        except ValueError:  # today is 29 February
+            dob = today.replace(year=today.year - age, day=28)
+        return dob + timedelta(days=days_offset)
+
+    def assert_blocked(self, fragment):
+        ok, reasons = eligibility(self.donor)
+        self.assertFalse(ok)
+        self.assertTrue(any(fragment in r for r in reasons), reasons)
+
+    def test_eligible_donor_passes(self):
+        self.assertEqual(eligibility(self.donor), (True, []))
+
+    def test_age_boundaries(self):
+        self.donor.date_of_birth = self.birthday(18)
+        self.assertTrue(eligibility(self.donor)[0])
+        self.donor.date_of_birth = self.birthday(18, days_offset=1)
+        self.assert_blocked("Age must be between 18 and 65")
+        self.donor.date_of_birth = self.birthday(66)
+        self.assert_blocked("Age must be between 18 and 65")
+
+    def test_minimum_weight(self):
+        self.donor.weight_kg = 50
+        self.assertTrue(eligibility(self.donor)[0])
+        self.donor.weight_kg = 49.9
+        self.assert_blocked("Weight must be at least 50")
+
+    def test_minimum_interval_since_last_donation(self):
+        Donation.objects.create(
+            donation_id="DON-ELIG-1",
+            donor=self.donor,
+            collected_at=timezone.now() - timedelta(days=30),
+            collector=self.staff,
+            branch=self.branch,
+        )
+        self.assert_blocked("Minimum donation interval has not elapsed.")
+        Donation.objects.filter(donation_id="DON-ELIG-1").update(collected_at=timezone.now() - timedelta(days=91))
+        self.assertTrue(eligibility(self.donor)[0])
+
+    def test_consent_required(self):
+        self.donor.consent_given = False
+        self.assert_blocked("Donor consent is required.")
+
+    def test_deferrals(self):
+        today = timezone.localdate()
+        expired = Deferral.objects.create(
+            donor=self.donor, reason="Cold", start_date=today - timedelta(days=20), end_date=today - timedelta(days=1),
+            approved_by=self.staff,
+        )
+        self.assertTrue(eligibility(self.donor)[0])
+        expired.end_date = today + timedelta(days=5)
+        expired.save()
+        self.assert_blocked("An active donor deferral applies.")
+        expired.delete()
+        Deferral.objects.create(donor=self.donor, reason="Hepatitis history", permanent=True, approved_by=self.staff)
+        self.assert_blocked("An active donor deferral applies.")
+
+    def test_rules_come_from_configuration(self):
+        self.rule.min_weight_kg = 65
+        self.rule.save()
+        self.assert_blocked("Weight must be at least 65")
+
+    def test_missing_configuration_blocks(self):
+        EligibilityRule.objects.all().delete()
+        self.assert_blocked("Eligibility rules have not been configured.")
+
+    def test_every_failed_rule_is_reported(self):
+        self.donor.weight_kg = 40
+        self.donor.consent_given = False
+        self.donor.date_of_birth = self.birthday(70)
+        ok, reasons = eligibility(self.donor)
+        self.assertFalse(ok)
+        self.assertEqual(len(reasons), 3)
+
+
+class RequestStateMachineUnitTests(TestCase):
+    """BB-45 [NFR-08]: unit tests for every request state transition (FR-20)."""
+
+    ALLOWED = {
+        "PENDING": {"APPROVED", "REJECTED", "CANCELLED"},
+        "APPROVED": {"PARTIAL", "FULFILLED", "CANCELLED"},
+        "PARTIAL": {"FULFILLED", "CANCELLED"},
+        "FULFILLED": set(),
+        "REJECTED": set(),
+        "CANCELLED": set(),
+    }
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Request SM Branch", code="RSM")
+        self.staff = User.objects.create_user("rsmstaff@bbms.test", email="rsmstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+
+    def make_request(self, status):
+        return BloodRequest.objects.create(
+            hospital="RSM Hospital",
+            created_by=self.staff,
+            branch=self.branch,
+            blood_group="B+",
+            component="Plasma",
+            quantity=1,
+            priority="Routine",
+            required_by=timezone.now() + timedelta(days=1),
+            clinical_reference=f"REF-RSM-{status}",
+            status=status,
+        )
+
+    def test_every_request_state_pair(self):
+        self.assertEqual(set(self.ALLOWED), set(BloodRequest.Status.values))
+        for current in BloodRequest.Status.values:
+            for target in BloodRequest.Status.values:
+                with self.subTest(current=current, target=target):
+                    req = self.make_request(current)
+                    if target in self.ALLOWED[current]:
+                        transition_request(req, target, self.staff)
+                        req.refresh_from_db()
+                        self.assertEqual(req.status, target)
+                        self.assertTrue(req.transitions.filter(from_status=current, to_status=target, actor=self.staff).exists())
+                    else:
+                        with self.assertRaises(ValueError):
+                            transition_request(req, target, self.staff)
+                        req.refresh_from_db()
+                        self.assertEqual(req.status, current)
+                        self.assertFalse(req.transitions.exists())
+                    req.transitions.all().delete()
+                    req.delete()
+
+    def test_cancelling_releases_reserved_units(self):
+        donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="RSM Donor",
+            email="rsmdonor@example.test",
+            phone="9000000111",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="B+",
+            consent_given=True,
+        )
+        donation = Donation.objects.create(
+            donation_id="DON-RSM-1", donor=donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+        unit = BloodUnit.objects.create(
+            unit_id="UNIT-RSM-1",
+            donation=donation,
+            blood_group="B+",
+            component="Plasma",
+            volume_ml=220,
+            expiry_at=timezone.now() + timedelta(days=30),
+            branch=self.branch,
+            status=BloodUnit.Status.AVAILABLE,
+        )
+        req = self.make_request(BloodRequest.Status.APPROVED)
+        reservation = reserve_units(req, self.staff)[0]
+        transition_request(req, BloodRequest.Status.CANCELLED, self.staff)
+        reservation.refresh_from_db()
+        unit.refresh_from_db()
+        self.assertFalse(reservation.active)
+        self.assertEqual(unit.status, BloodUnit.Status.AVAILABLE)
