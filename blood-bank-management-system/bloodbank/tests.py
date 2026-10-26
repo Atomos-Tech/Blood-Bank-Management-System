@@ -2211,3 +2211,39 @@ class RequestStateMachineUnitTests(TestCase):
         unit.refresh_from_db()
         self.assertFalse(reservation.active)
         self.assertEqual(unit.status, BloodUnit.Status.AVAILABLE)
+
+
+class DuplicateDonorEmailTests(TestCase):
+    """BB-09 [FR-02] / TC-F01: one donor profile per email address."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Dup Branch", code="DUP")
+        self.staff = User.objects.create_user("dupstaff@bbms.test", email="dupstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.client.force_login(self.staff)
+
+    def payload(self, email):
+        return {
+            "full_name": "Donor One",
+            "email": email,
+            "phone": "9000000001",
+            "date_of_birth": "1995-05-05",
+            "weight_kg": "60",
+            "blood_group": "O+",
+            "medical_history": "None",
+            "consent_given": "on",
+        }
+
+    def test_tc_f01_second_registration_with_same_email_is_rejected(self):
+        self.client.post("/donors/", self.payload("donor1@example.test"))
+        self.assertEqual(Donor.objects.count(), 1)
+        response = self.client.post("/donors/", self.payload("donor1@example.test"))
+        self.assertContains(response, "already registered with this email")
+        self.assertEqual(Donor.objects.count(), 1)
+
+    def test_email_comparison_is_case_insensitive(self):
+        self.client.post("/donors/", self.payload("donor1@example.test"))
+        response = self.client.post("/donors/", self.payload("  Donor1@EXAMPLE.test "))
+        self.assertContains(response, "already registered with this email")
+        self.assertEqual(Donor.objects.count(), 1)
+        self.assertEqual(Donor.objects.get().email, "donor1@example.test")

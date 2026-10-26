@@ -18,6 +18,16 @@ class DonorForm(forms.ModelForm):
             "consent_given",
         ]
 
+    def clean_email(self):
+        # FR-02: one donor profile per email address, compared case-insensitively.
+        email = (self.cleaned_data.get("email") or "").strip().lower()
+        duplicates = Donor.objects.filter(email__iexact=email)
+        if self.instance.pk:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise forms.ValidationError("A donor profile is already registered with this email address.")
+        return email
+
 
 class AppointmentForm(forms.Form):
     slot = forms.ModelChoiceField(queryset=AppointmentSlot.objects.none())
