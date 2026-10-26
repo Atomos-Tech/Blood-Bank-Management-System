@@ -1381,3 +1381,86 @@ class LabResultRecordingTests(ScreeningFixtureMixin, TestCase):
             with self.assertRaisesMessage(ValueError, "Results can only be recorded while the unit is Collected or Testing."):
                 record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
             self.assertFalse(LabResult.objects.filter(unit=unit).exists())
+
+
+class ReleaseAfterAcceptablePanelTests(ScreeningFixtureMixin, TestCase):
+    """BB-19 [FR-12] & TC-F07: Release a unit to Available only after all mandatory tests are acceptable."""
+
+    def record(self, unit, tests, outcome=LabResult.Outcome.ACCEPTABLE):
+        for test in tests:
+            record_lab_result(unit, test, outcome, self.staff)
+            unit.refresh_from_db()
+
+    def test_tc_f07_complete_acceptable_panel_becomes_available(self):
+        unit = self.make_unit()
+        self.record(unit, self.panel[:-1])
+        self.assertEqual(unit.status, BloodUnit.Status.TESTING)
+        self.record(unit, self.panel[-1:])
+        self.assertEqual(unit.status, BloodUnit.Status.AVAILABLE)
+
+    def test_tc_f07_partial_panel_stays_out_of_available(self):
+        unit = self.make_unit()
+        self.record(unit, self.panel[:3])
+        self.assertEqual(unit.status, BloodUnit.Status.TESTING)
+        self.assertEqual(release_screened_unit(unit, self.staff), BloodUnit.Status.QUARANTINED)
+        event = AuditEvent.objects.filter(event_type="SCREENING_REVIEWED", record_id=str(unit.pk)).latest("id")
+        self.assertIn("mandatory panel incomplete", event.summary)
+
+    def test_tc_f07_mixed_panel_never_becomes_available(self):
+        unit = self.make_unit()
+        self.record(unit, self.panel[:2])
+        self.record(unit, self.panel[2:3], LabResult.Outcome.REACTIVE)
+        self.assertEqual(unit.status, BloodUnit.Status.QUARANTINED)
+        with self.assertRaises(ValueError):
+            record_lab_result(unit, self.panel[3], LabResult.Outcome.ACCEPTABLE, self.staff)
+        with self.assertRaises(ValueError):
+            release_screened_unit(unit, self.staff)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.QUARANTINED)
+
+    def test_optional_tests_do_not_block_release(self):
+        unit = self.make_unit()
+        self.record(unit, self.panel)
+        self.assertEqual(unit.status, BloodUnit.Status.AVAILABLE)
+        self.assertFalse(LabResult.objects.filter(unit=unit, test_type=self.optional).exists())
+
+    def test_release_refused_when_no_panel_is_configured(self):
+        TestType.objects.all().delete()
+        unit = self.make_unit()
+        with self.assertRaisesMessage(ValueError, "No mandatory test panel is configured"):
+            release_screened_unit(unit, self.staff)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.COLLECTED)
+
+    def test_release_button_moves_complete_panel_through_the_view(self):
+        unit = self.make_unit()
+        self.client.force_login(self.staff)
+        for test in self.panel:
+            resp = self.client.post(f"/inventory/{unit.pk}/screen/", {"test_type": test.pk, "outcome": "ACCEPTABLE"})
+            self.assertEqual(resp.status_code, 302)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.AVAILABLE)
+
+        partial = self.make_unit()
+        self.client.post(f"/inventory/{partial.pk}/screen/", {"test_type": self.panel[0].pk, "outcome": "ACCEPTABLE"})
+        self.assertEqual(self.client.post(f"/inventory/{partial.pk}/release/").status_code, 302)
+        partial.refresh_from_db()
+        self.assertEqual(partial.status, BloodUnit.Status.QUARANTINED)
+
+    def test_only_blood_bank_staff_can_record_and_release(self):
+        unit = self.make_unit()
+        hospital = User.objects.create_user("labhosp@bbms.test", email="labhosp@bbms.test", password="pw")
+        UserProfile.objects.create(user=hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="H")
+        donor_user = User.objects.create_user("labdonoruser@bbms.test", email="labdonoruser@bbms.test", password="pw")
+        UserProfile.objects.create(user=donor_user, role=UserProfile.Role.DONOR, branch=self.branch)
+        for user in (hospital, donor_user):
+            self.client.force_login(user)
+            self.assertEqual(self.client.get(f"/inventory/{unit.pk}/screen/").status_code, 403)
+            self.assertEqual(
+                self.client.post(f"/inventory/{unit.pk}/screen/", {"test_type": self.panel[0].pk, "outcome": "ACCEPTABLE"}).status_code,
+                403,
+            )
+            self.assertEqual(self.client.post(f"/inventory/{unit.pk}/release/").status_code, 403)
+        self.assertFalse(LabResult.objects.filter(unit=unit).exists())
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.COLLECTED)

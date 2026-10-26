@@ -306,28 +306,48 @@ def record_lab_result(unit, test_type, outcome, user):
         if unit.status == BloodUnit.Status.COLLECTED:
             transition_unit(unit, BloodUnit.Status.TESTING, user, reason="Screening started")
         audit(user, "LAB_RESULT_RECORDED", unit, summary=f"{test_type.name}: {outcome}", branch=unit.branch)
+        # A bad result quarantines at once; the last acceptable result releases. Otherwise the unit stays in Testing.
+        target = screening_outcome(unit)
+        if target is not None:
+            transition_unit(unit, target, user, reason=f"After {test_type.name} result", event_type="SCREENING_REVIEWED")
     return result
+
+
+def screening_outcome(unit):
+    """FR-12/FR-13: Quarantined if any mandatory result is not acceptable, Available once every mandatory
+    result is acceptable, None while the panel is still incomplete or when no panel is configured."""
+    required = set(TestType.objects.filter(required=True).values_list("id", flat=True))
+    if not required:
+        return None
+    outcomes = dict(unit.lab_results.filter(test_type_id__in=required).values_list("test_type_id", "outcome"))
+    if any(outcome != LabResult.Outcome.ACCEPTABLE for outcome in outcomes.values()):
+        return BloodUnit.Status.QUARANTINED
+    if required.issubset(outcomes):
+        return BloodUnit.Status.AVAILABLE
+    return None
 
 
 @transaction.atomic
 def release_screened_unit(unit, user):
+    """Release review: the unit goes to Available only with a complete acceptable panel; an incomplete
+    or failed panel at release is Quarantined (TC-F07)."""
+    if not TestType.objects.filter(required=True).exists():
+        raise ValueError("No mandatory test panel is configured, so the unit cannot be released.")
     if unit.status == BloodUnit.Status.COLLECTED:
         transition_unit(unit, BloodUnit.Status.TESTING, user, reason="Screening started")
-    required = set(TestType.objects.filter(required=True).values_list("id", flat=True))
-    outcomes = dict(unit.lab_results.values_list("test_type_id", "outcome"))
-    if not required.issubset(outcomes):
-        target = BloodUnit.Status.QUARANTINED
-    elif any(
-        outcomes[t] in (LabResult.Outcome.REACTIVE, LabResult.Outcome.INDETERMINATE, LabResult.Outcome.INCOMPLETE)
-        for t in required
-    ):
-        target = BloodUnit.Status.QUARANTINED
-    elif all(outcomes[t] == LabResult.Outcome.ACCEPTABLE for t in required):
-        target = BloodUnit.Status.AVAILABLE
+    if unit.status != BloodUnit.Status.TESTING:
+        raise ValueError("Only a unit under screening can be released.")
+    outcome = screening_outcome(unit)
+    if outcome is None:
+        transition_unit(
+            unit,
+            BloodUnit.Status.QUARANTINED,
+            user,
+            reason="Release review: mandatory panel incomplete",
+            event_type="SCREENING_REVIEWED",
+        )
     else:
-        target = BloodUnit.Status.TESTING
-    if target != unit.status:
-        transition_unit(unit, target, user, event_type="SCREENING_REVIEWED")
+        transition_unit(unit, outcome, user, reason="Release review", event_type="SCREENING_REVIEWED")
     return unit.status
 
 

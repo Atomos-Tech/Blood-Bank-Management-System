@@ -13,6 +13,7 @@ urlpatterns = [
     path("inventory/", views.inventory, name="inventory"),
     path("donations/new/", views.donation_view, name="donation"),
     path("inventory/<int:pk>/screen/", views.screening_view, name="screening"),
+    path("inventory/<int:pk>/release/", views.release_view, name="release"),
     path("inventory/<int:pk>/discard/", views.discard_view, name="discard"),
     path("requests/", views.request_list, name="requests"),
     path("requests/<int:pk>/<str:action>/", views.request_action, name="request_action"),

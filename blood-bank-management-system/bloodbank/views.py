@@ -436,9 +436,8 @@ def screening_view(request, pk):
         except ValueError as e:
             form.add_error(None, str(e))
         else:
-            release_screened_unit(unit, request.user)
             messages.success(request, f"Result recorded. Unit is now {unit.get_status_display()}.")
-            return redirect("inventory")
+            return redirect("screening", pk=unit.pk)
     return render(
         request,
         "bloodbank/screening.html",
@@ -449,6 +448,22 @@ def screening_view(request, pk):
             "panel": TestType.objects.filter(required=True).order_by("name"),
         },
     )
+
+
+@login_required
+@require_POST
+def release_view(request, pk):
+    if not allowed(request.user, STAFF):
+        return deny(request.user)
+    unit = get_object_or_404(BloodUnit.objects.select_related("branch"), pk=pk)
+    if not in_branch_scope(request.user, unit.branch_id):
+        return deny(request.user, "Cross-branch unit release denied")
+    try:
+        release_screened_unit(unit, request.user)
+        messages.success(request, f"Release reviewed. Unit {unit.unit_id} is now {unit.get_status_display()}.")
+    except ValueError as e:
+        messages.error(request, str(e))
+    return redirect("screening", pk=unit.pk)
 
 
 @login_required
