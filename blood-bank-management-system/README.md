@@ -13,6 +13,10 @@ A Django academic implementation of the submitted Blood Bank Management System s
 - Hospital request creation, request-state history, compatibility-based reservation, cross-match, and atomic issue.
 - Structured audit events, notification delivery records, protected Django administration, CSRF-protected forms, generic authentication failures, rate-limited lockout, and 15-minute session lifetime.
 
+## Sprint demos
+
+- Sprint 1 (donor module: registration, eligibility, deferrals, appointments): [docs/videos/sprint1-donor-module-demo.mp4](../docs/videos/sprint1-donor-module-demo.mp4)
+
 ## Local setup
 
 The checked-in local development database uses SQLite. Django and its dependencies are listed in `requirements.txt`.
