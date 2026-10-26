@@ -2,16 +2,24 @@
 <div class="grid2">
 <section class="panel form-panel">
   <h3>{{ title }}{% if donor %} · {{ donor.full_name }}{% endif %}</h3>
+  {% if current %}<p class="mono">Current slot: {{ current.slot.branch.name }} · {{ current.slot.starts_at }}</p>{% endif %}
   {% if not eligible %}
   <div class="eligibility-block" role="alert">
     <p class="error"><b>Booking blocked.</b> Every failed eligibility rule is listed below.</p>
     <ul class="failed-rules">{% for reason in reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
   </div>
   {% endif %}
+  {% if filter_form %}
+  <form method="get" class="inline-form branch-filter">
+    {% if donor and request.GET.donor %}<input type="hidden" name="donor" value="{{ donor.pk }}">{% endif %}
+    <label>Branch {{ filter_form.branch }}</label><button class="action">Filter slots</button>
+  </form>
+  {% endif %}
   <form method="post">{% csrf_token %}
     {% for error in form.non_field_errors %}<p class="error">{{ error }}</p>{% endfor %}
     {% for field in form %}<label>{{ field.label }}{{ field }}{% for error in field.errors %}<span class="error">{{ error }}</span>{% endfor %}</label>{% endfor %}
-    <div class="form-actions"><a class="quiet" href="{% url cancel %}">Cancel</a><button class="primary"{% if not eligible %} disabled aria-disabled="true"{% endif %}>Confirm appointment</button></div>
+    {% if not form.fields.slot.queryset.exists %}<p class="error">No future slots with free places{% if filter_form.branch.value %} at this branch{% endif %}.</p>{% endif %}
+    <div class="form-actions"><a class="quiet" href="{% url cancel %}">Back</a><button class="primary"{% if not eligible %} disabled aria-disabled="true"{% endif %}>{% if current %}Confirm new slot{% else %}Confirm appointment{% endif %}</button></div>
   </form>
 </section>
 </div>

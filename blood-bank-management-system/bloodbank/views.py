@@ -12,14 +12,16 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_http_methods, require_POST
-from .forms import (AppointmentForm, BloodRequestForm, CrossMatchForm, DeferralForm,
+from .forms import (AppointmentForm, BloodRequestForm, BranchFilterForm, CrossMatchForm, DeferralForm,
                     DonorForm, DonationForm, LabResultForm)
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
                      Reservation, TestType, UserProfile)
-from .services import (DuplicateLabResult, audit, check_stock_and_expiry_alerts, discard_unit, eligibility,
+from .services import (AppointmentError, DuplicateLabResult, audit, book_appointment,
+                       cancel_appointment as cancel_appointment_service, reschedule_appointment,
+                       check_stock_and_expiry_alerts, discard_unit, eligibility,
                        expire_units, record_donation, record_lab_result,
-                       get_branch_warnings, issue_reservation, notify, release_reservation,
+                       get_branch_warnings, issue_reservation, release_reservation,
                        release_screened_unit, reserve_units, transition_request)
 
 # SEC-01: server-side role sets taken from the SRS 6.3 role-permission matrix (Table 4).
@@ -276,21 +278,42 @@ def my_donor_record(request):
     )
 
 
+def _appointment_actor(request, donor_param=None):
+    """Resolve the donor whose appointments the user may manage, or return an HTTP response to send instead."""
+    if role(request.user) == UserProfile.Role.DONOR:
+        return get_object_or_404(Donor, user=request.user), None
+    if allowed(request.user, STAFF):
+        donor = get_object_or_404(Donor, pk=donor_param) if donor_param else None
+        if donor and donor.branch_id and not in_branch_scope(request.user, donor.branch_id):
+            return None, deny(request.user, "Cross-branch donor appointment denied")
+        return donor, None
+    return None, deny(request.user)
+
+
+def _after_appointment(request):
+    return redirect("my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors")
+
+
+def _slot_branch_filter(request):
+    """Staff only see their own branch; donors may filter by any branch (FR-05)."""
+    ub = user_branch(request.user)
+    if ub is not None and role(request.user) == UserProfile.Role.STAFF:
+        return ub, None
+    filter_form = BranchFilterForm(request.GET or None)
+    branch = filter_form.cleaned_data["branch"] if filter_form.is_valid() else None
+    return branch, filter_form
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def appointment_view(request):
-    ub = user_branch(request.user)
-    if role(request.user) == UserProfile.Role.DONOR:
-        donor = get_object_or_404(Donor, user=request.user)
-    elif allowed(request.user, STAFF):
-        donor = get_object_or_404(Donor, pk=request.GET.get("donor")) if request.GET.get("donor") else None
-        if donor and donor.branch_id and not in_branch_scope(request.user, donor.branch_id):
-            return deny(request.user, "Cross-branch donor appointment denied")
-    else:
-        return deny(request.user)
+    donor, response = _appointment_actor(request, request.GET.get("donor"))
+    if response:
+        return response
     if not donor:
         return redirect("donors")
-    form = AppointmentForm(request.POST or None, branch=ub)
+    branch, filter_form = _slot_branch_filter(request)
+    form = AppointmentForm(request.POST or None, branch=branch)
     # FR-04: evaluate every rule up front so the donor sees all failures before trying to book.
     ok, reasons = eligibility(donor)
     if request.method == "POST" and form.is_valid():
@@ -301,25 +324,76 @@ def appointment_view(request):
             form.add_error(None, "Appointment blocked until every eligibility rule passes.")
             audit(request.user, "APPOINTMENT_BLOCKED", donor, outcome="REJECTED",
                   summary=f"{len(reasons)} eligibility rule(s) failed", branch=slot.branch)
-        elif slot.available <= 0:
-            form.add_error("slot", "This slot is full.")
         else:
-            Appointment.objects.create(donor=donor, slot=slot)
-            audit(request.user, "APPOINTMENT_BOOKED", donor, summary=str(slot.starts_at), branch=slot.branch)
-            notify(
-                donor.email,
-                "Donation appointment confirmed",
-                f"Appointment at {slot.branch.name} on {slot.starts_at}.",
-            )
-            messages.success(request, "Appointment booked.")
-            return redirect("my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors")
+            try:
+                book_appointment(donor, slot, request.user)
+            except AppointmentError as e:
+                form.add_error("slot", str(e))
+            else:
+                messages.success(request, "Appointment booked. A confirmation email has been sent.")
+                return _after_appointment(request)
     return render(
         request,
         "bloodbank/appointments.html",
         {
             "title": "Book appointment",
             "form": form,
+            "filter_form": filter_form,
             "donor": donor,
+            "eligible": ok,
+            "reasons": reasons,
+            "cancel": "my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors",
+        },
+    )
+
+
+def _load_managed_appointment(request, pk):
+    ap = get_object_or_404(Appointment.objects.select_related("donor", "slot__branch"), pk=pk)
+    if role(request.user) == UserProfile.Role.DONOR:
+        if ap.donor.user_id != request.user.id:
+            return ap, deny(request.user, "Attempted change to another donor's appointment")
+    elif not allowed(request.user, STAFF):
+        return ap, deny(request.user)
+    elif not in_branch_scope(request.user, ap.slot.branch_id):
+        return ap, deny(request.user, "Cross-branch appointment change denied")
+    return ap, None
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def reschedule_appointment_view(request, pk):
+    ap, response = _load_managed_appointment(request, pk)
+    if response:
+        return response
+    if ap.status != Appointment.Status.BOOKED:
+        messages.error(request, "Only a booked appointment can be rescheduled.")
+        return _after_appointment(request)
+    branch, filter_form = _slot_branch_filter(request)
+    form = AppointmentForm(request.POST or None, branch=branch, exclude_slot=ap.slot)
+    ok, reasons = eligibility(ap.donor)
+    if request.method == "POST" and form.is_valid():
+        slot = form.cleaned_data["slot"]
+        if role(request.user) in STAFF and not in_branch_scope(request.user, slot.branch_id):
+            return deny(request.user, "Cross-branch slot booking denied")
+        if not ok:
+            form.add_error(None, "Appointment blocked until every eligibility rule passes.")
+        else:
+            try:
+                reschedule_appointment(ap, slot, request.user)
+            except AppointmentError as e:
+                form.add_error("slot", str(e))
+            else:
+                messages.success(request, "Appointment rescheduled. A confirmation email has been sent.")
+                return _after_appointment(request)
+    return render(
+        request,
+        "bloodbank/appointments.html",
+        {
+            "title": "Reschedule appointment",
+            "current": ap,
+            "form": form,
+            "filter_form": filter_form,
+            "donor": ap.donor,
             "eligible": ok,
             "reasons": reasons,
             "cancel": "my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors",
@@ -330,17 +404,16 @@ def appointment_view(request):
 @login_required
 @require_POST
 def cancel_appointment(request, pk):
-    ap = get_object_or_404(Appointment.objects.select_related("donor", "slot__branch"), pk=pk)
-    if role(request.user) == UserProfile.Role.DONOR and ap.donor.user_id != request.user.id:
-        return deny(request.user)
-    if not (role(request.user) == UserProfile.Role.DONOR or allowed(request.user, STAFF)):
-        return deny(request.user)
-    if role(request.user) == UserProfile.Role.STAFF and not in_branch_scope(request.user, ap.slot.branch_id):
-        return deny(request.user, "Cross-branch appointment cancellation denied")
-    ap.status = Appointment.Status.CANCELLED
-    ap.save(update_fields=["status"])
-    audit(request.user, "APPOINTMENT_CANCELLED", ap, branch=ap.slot.branch)
-    return redirect("my_donor" if role(request.user) == UserProfile.Role.DONOR else "donors")
+    ap, response = _load_managed_appointment(request, pk)
+    if response:
+        return response
+    try:
+        cancel_appointment_service(ap, request.user)
+    except AppointmentError as e:
+        messages.error(request, str(e))
+    else:
+        messages.success(request, "Appointment cancelled.")
+    return _after_appointment(request)
 
 
 @login_required

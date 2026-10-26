@@ -2526,3 +2526,97 @@ class DonorDeferralTests(TestCase):
         response = self.client.get("/deferrals/")
         self.assertContains(response, "Defer Donor")
         self.assertNotContains(response, outsider.full_name)
+
+
+class AppointmentLifecycleTests(TestCase):
+    """BB-12 [FR-05] / TC-F03: create, reschedule and cancel appointments for future slots with capacity."""
+
+    def setUp(self):
+        self.main = Branch.objects.create(name="Main Appt", code="MAPT")
+        self.north = Branch.objects.create(name="North Appt", code="NAPT")
+        EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+        now = timezone.now()
+        self.past = AppointmentSlot.objects.create(branch=self.main, starts_at=now - timedelta(hours=2), capacity=5)
+        self.slot_a = AppointmentSlot.objects.create(branch=self.main, starts_at=now + timedelta(days=1), capacity=2)
+        self.slot_b = AppointmentSlot.objects.create(branch=self.main, starts_at=now + timedelta(days=2), capacity=2)
+        self.north_slot = AppointmentSlot.objects.create(branch=self.north, starts_at=now + timedelta(days=3), capacity=2)
+        self.full = AppointmentSlot.objects.create(branch=self.main, starts_at=now + timedelta(days=4), capacity=1)
+        self.user = self.make_donor("appt-a")
+        self.other_user = self.make_donor("appt-b")
+        Appointment.objects.create(donor=self.other_user.donor_profile, slot=self.full)
+        self.donor = self.user.donor_profile
+        self.client.force_login(self.user)
+
+    def make_donor(self, key):
+        user = User.objects.create_user(f"{key}@bbms.test", email=f"{key}@bbms.test", password="pw")
+        UserProfile.objects.create(user=user, role=UserProfile.Role.DONOR, branch=self.main)
+        Donor.objects.create(
+            user=user, branch=self.main, full_name=key, email=f"{key}@bbms.test", phone="9000000666",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="O+", consent_given=True,
+        )
+        return user
+
+    def offered(self, url="/appointments/"):
+        return list(self.client.get(url).context["form"].fields["slot"].queryset)
+
+    def test_only_future_slots_with_free_capacity_are_offered(self):
+        offered = self.offered()
+        self.assertIn(self.slot_a, offered)
+        self.assertNotIn(self.past, offered)
+        self.assertNotIn(self.full, offered)
+
+    def test_donor_can_filter_slots_by_branch(self):
+        offered = self.offered(f"/appointments/?branch={self.north.pk}")
+        self.assertEqual(offered, [self.north_slot])
+
+    def test_past_slot_cannot_be_booked_even_if_posted(self):
+        response = self.client.post("/appointments/", {"slot": self.past.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Appointment.objects.filter(donor=self.donor).exists())
+
+    def test_tc_f03_book_is_audited_and_confirmation_recorded(self):
+        response = self.client.post("/appointments/", {"slot": self.slot_a.pk})
+        self.assertRedirects(response, "/my-record/")
+        ap = Appointment.objects.get(donor=self.donor)
+        self.assertTrue(AuditEvent.objects.filter(event_type="APPOINTMENT_BOOKED", record_id=str(ap.pk)).exists())
+        self.assertTrue(Notification.objects.filter(recipient=self.donor.email, subject="Donation appointment confirmed").exists())
+
+    def test_donor_can_reschedule_booked_appointment(self):
+        ap = Appointment.objects.create(donor=self.donor, slot=self.slot_a)
+        offered = self.offered(f"/appointments/{ap.pk}/reschedule/")
+        self.assertNotIn(self.slot_a, offered)
+        response = self.client.post(f"/appointments/{ap.pk}/reschedule/", {"slot": self.slot_b.pk})
+        self.assertRedirects(response, "/my-record/")
+        ap.refresh_from_db()
+        self.assertEqual(ap.slot, self.slot_b)
+        self.assertEqual(ap.status, Appointment.Status.BOOKED)
+        self.assertTrue(AuditEvent.objects.filter(event_type="APPOINTMENT_RESCHEDULED", record_id=str(ap.pk)).exists())
+        self.assertTrue(Notification.objects.filter(subject="Donation appointment rescheduled").exists())
+
+    def test_reschedule_to_full_slot_is_rejected(self):
+        ap = Appointment.objects.create(donor=self.donor, slot=self.slot_a)
+        response = self.client.post(f"/appointments/{ap.pk}/reschedule/", {"slot": self.full.pk})
+        self.assertEqual(response.status_code, 200)
+        ap.refresh_from_db()
+        self.assertEqual(ap.slot, self.slot_a)
+
+    def test_donor_can_cancel_only_own_appointment(self):
+        mine = Appointment.objects.create(donor=self.donor, slot=self.slot_a)
+        theirs = Appointment.objects.get(slot=self.full)
+        self.assertEqual(self.client.post(f"/appointments/{theirs.pk}/cancel/").status_code, 403)
+        self.assertEqual(self.client.post(f"/appointments/{theirs.pk}/reschedule/", {"slot": self.slot_b.pk}).status_code, 403)
+        theirs.refresh_from_db()
+        self.assertEqual(theirs.status, Appointment.Status.BOOKED)
+        self.assertRedirects(self.client.post(f"/appointments/{mine.pk}/cancel/"), "/my-record/")
+        mine.refresh_from_db()
+        self.assertEqual(mine.status, Appointment.Status.CANCELLED)
+        self.assertTrue(AuditEvent.objects.filter(event_type="APPOINTMENT_CANCELLED", record_id=str(mine.pk)).exists())
+        self.assertTrue(Notification.objects.filter(subject="Donation appointment cancelled").exists())
+
+    def test_cancelled_appointment_cannot_be_rescheduled_or_cancelled_again(self):
+        ap = Appointment.objects.create(donor=self.donor, slot=self.slot_a, status=Appointment.Status.CANCELLED)
+        self.client.post(f"/appointments/{ap.pk}/reschedule/", {"slot": self.slot_b.pk})
+        self.client.post(f"/appointments/{ap.pk}/cancel/")
+        ap.refresh_from_db()
+        self.assertEqual(ap.slot, self.slot_a)
+        self.assertFalse(AuditEvent.objects.filter(event_type="APPOINTMENT_CANCELLED").exists())

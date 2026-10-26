@@ -104,12 +104,36 @@ class DonorForm(forms.ModelForm):
         return email
 
 
-class AppointmentForm(forms.Form):
-    slot = forms.ModelChoiceField(queryset=AppointmentSlot.objects.none())
+class SlotChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, slot):
+        local = timezone.localtime(slot.starts_at)
+        return f"{slot.branch.name} · {local:%a %d %b %Y, %H:%M} · {slot.free} of {slot.capacity} places free"
 
-    def __init__(self, *args, branch=None, **kwargs):
+
+class AppointmentForm(forms.Form):
+    """FR-05: only future slots that still have free capacity are offered, optionally filtered by branch."""
+
+    slot = SlotChoiceField(queryset=AppointmentSlot.objects.none(), empty_label="Select a time slot")
+
+    def __init__(self, *args, branch=None, exclude_slot=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["slot"].queryset = AppointmentSlot.objects.all().order_by("starts_at")
+        slots = (
+            AppointmentSlot.objects.select_related("branch")
+            .filter(starts_at__gt=timezone.now())
+            .annotate(booked=models.Count("appointments", filter=models.Q(appointments__status=Appointment.Status.BOOKED)))
+            .annotate(free=models.F("capacity") - models.F("booked"))
+            .filter(free__gt=0)
+            .order_by("starts_at")
+        )
+        if branch is not None:
+            slots = slots.filter(branch=branch)
+        if exclude_slot is not None:
+            slots = slots.exclude(pk=exclude_slot.pk)
+        self.fields["slot"].queryset = slots
+
+
+class BranchFilterForm(forms.Form):
+    branch = forms.ModelChoiceField(queryset=Branch.objects.order_by("name"), required=False, empty_label="All branches")
 
 
 class DeferralForm(forms.ModelForm):

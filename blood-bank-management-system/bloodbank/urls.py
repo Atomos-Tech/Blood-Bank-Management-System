@@ -9,6 +9,7 @@ urlpatterns = [
     path("my-record/", views.my_donor_record, name="my_donor"),
     path("appointments/", views.appointment_view, name="appointments"),
     path("appointments/<int:pk>/cancel/", views.cancel_appointment, name="cancel_appointment"),
+    path("appointments/<int:pk>/reschedule/", views.reschedule_appointment_view, name="reschedule_appointment"),
     path("deferrals/", views.deferral_view, name="deferrals"),
     path("inventory/", views.inventory, name="inventory"),
     path("donations/new/", views.donation_view, name="donation"),

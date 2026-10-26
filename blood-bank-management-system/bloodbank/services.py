@@ -145,6 +145,68 @@ def record_donation(donor, branch, collector, blood_group, components, collected
                 raise
 
 
+class AppointmentError(ValueError):
+    pass
+
+
+def _check_slot_bookable(donor, slot, ignore=None):
+    if slot.starts_at <= timezone.now():
+        raise AppointmentError("This slot is in the past. Choose a future slot.")
+    booked = slot.appointments.filter(status=Appointment.Status.BOOKED)
+    if ignore is not None:
+        booked = booked.exclude(pk=ignore.pk)
+    if booked.filter(donor=donor).exists():
+        raise AppointmentError("The donor already has a booking for this slot.")
+    if booked.count() >= slot.capacity:
+        raise AppointmentError("This slot is full.")
+
+
+def _slot_text(slot):
+    return f"{slot.branch.name} on {timezone.localtime(slot.starts_at):%d %b %Y %H:%M %Z}"
+
+
+def book_appointment(donor, slot, user):
+    """FR-05: book an eligible donor into a future slot with free capacity; audited and confirmed by email."""
+    with transaction.atomic():
+        _check_slot_bookable(donor, slot)
+        appointment = Appointment.objects.create(donor=donor, slot=slot)
+        audit(user, "APPOINTMENT_BOOKED", appointment, summary=_slot_text(slot), branch=slot.branch)
+    notify(donor.email, "Donation appointment confirmed", f"Your appointment is booked at {_slot_text(slot)}.")
+    return appointment
+
+
+def reschedule_appointment(appointment, new_slot, user):
+    """FR-05: move a booked appointment to another future slot with free capacity."""
+    if appointment.status != Appointment.Status.BOOKED:
+        raise AppointmentError("Only a booked appointment can be rescheduled.")
+    if new_slot.pk == appointment.slot_id:
+        raise AppointmentError("Choose a different slot to reschedule.")
+    old_slot = appointment.slot
+    with transaction.atomic():
+        _check_slot_bookable(appointment.donor, new_slot, ignore=appointment)
+        appointment.slot = new_slot
+        appointment.save(update_fields=["slot"])
+        audit(user, "APPOINTMENT_RESCHEDULED", appointment,
+              summary=f"{_slot_text(old_slot)} -> {_slot_text(new_slot)}", branch=new_slot.branch)
+    notify(appointment.donor.email, "Donation appointment rescheduled",
+           f"Your appointment has moved to {_slot_text(new_slot)}.")
+    return appointment
+
+
+def cancel_appointment(appointment, user):
+    """FR-05: cancel a booked appointment, releasing its place in the slot."""
+    if appointment.status != Appointment.Status.BOOKED:
+        raise AppointmentError("This appointment is not active.")
+    with transaction.atomic():
+        appointment.status = Appointment.Status.CANCELLED
+        appointment.save(update_fields=["status"])
+        audit(user, "APPOINTMENT_CANCELLED", appointment, summary=_slot_text(appointment.slot),
+              branch=appointment.slot.branch)
+    notify(appointment.donor.email, "Donation appointment cancelled",
+           f"Your appointment at {_slot_text(appointment.slot)} has been cancelled.")
+    return appointment
+
+
 def active_eligibility_rule():
     return EligibilityRule.objects.filter(active=True).order_by("id").first()
 
