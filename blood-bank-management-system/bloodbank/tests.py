@@ -24,6 +24,7 @@ from .models import (
     Donation,
     Donor,
     EligibilityRule,
+    ImmutableAuditRecord,
     Issue,
     LabResult,
     Notification,
@@ -38,6 +39,7 @@ from .services import (
     UNIT_TRANSITIONS,
     DuplicateLabResult,
     InvalidUnitTransition,
+    audit,
     check_stock_and_expiry_alerts,
     discard_unit,
     expire_units,
@@ -1634,3 +1636,110 @@ class ScheduledUnitExpiryTests(TestCase):
         compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()
         self.assertIn("scheduler:", compose)
         self.assertIn("python manage.py expire_units --every 300", compose)
+
+
+class AuditRecordImmutabilityTests(TestCase):
+    """BB-56 [SEC-07] & TC-S03: Complete, tamper-resistant audit records."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Audit Branch", code="AUD")
+        self.staff = User.objects.create_user("auditstaff@bbms.test", email="auditstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.superuser = User.objects.create_superuser("root@bbms.test", email="root@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.superuser, role=UserProfile.Role.ADMIN, branch=self.branch)
+        self.hospital = User.objects.create_user("audithosp@bbms.test", email="audithosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="Audit Hospital"
+        )
+        donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="Audit Donor",
+            email="auditdonor@example.test",
+            phone="9000000107",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="B-",
+            consent_given=True,
+        )
+        donation = Donation.objects.create(
+            donation_id="DON-AUD-1", donor=donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+        self.unit = BloodUnit.objects.create(
+            unit_id="UNIT-AUD-1",
+            donation=donation,
+            blood_group="B-",
+            component="Plasma",
+            volume_ml=220,
+            expiry_at=timezone.now() + timedelta(days=30),
+            branch=self.branch,
+        )
+        TestType.objects.create(name="HIV", required=True)
+
+    def test_tc_s03_operational_events_carry_all_five_fields(self):
+        record_lab_result(self.unit, TestType.objects.get(), LabResult.Outcome.ACCEPTABLE, self.staff)
+        self.client.force_login(self.hospital)
+        self.client.get(f"/inventory/{self.unit.pk}/screen/")  # rejected authorization attempt
+        events = AuditEvent.objects.all()
+        self.assertGreaterEqual(events.count(), 3)
+        for event in events:
+            self.assertIsNotNone(event.actor, event.event_type)
+            self.assertTrue(event.event_type)
+            self.assertTrue(event.record_id)
+            self.assertTrue(event.outcome)
+            self.assertIsNotNone(event.created_at)
+            self.assertEqual(event.created_at.utcoffset(), timedelta(0))
+        self.assertTrue(events.filter(event_type="UNAUTHORIZED_ACCESS", outcome="DENIED", actor=self.hospital).exists())
+
+    def test_tc_s03_events_cannot_be_changed_or_deleted_through_the_model(self):
+        audit(self.staff, "TEST_EVENT", self.unit)
+        event = AuditEvent.objects.get(event_type="TEST_EVENT")
+        event.outcome = "FAILED"
+        with self.assertRaises(ImmutableAuditRecord):
+            event.save()
+        with self.assertRaises(ImmutableAuditRecord):
+            event.delete()
+        with self.assertRaises(ImmutableAuditRecord):
+            AuditEvent.objects.filter(pk=event.pk).update(outcome="FAILED")
+        with self.assertRaises(ImmutableAuditRecord):
+            AuditEvent.objects.filter(pk=event.pk).delete()
+        event.refresh_from_db()
+        self.assertEqual(event.outcome, "SUCCESS")
+
+    def test_incomplete_event_is_refused(self):
+        with self.assertRaises(ValueError):
+            AuditEvent.objects.create(actor=self.staff, event_type="", record_type="X", record_id="1")
+
+    def test_deleting_a_user_keeps_their_audit_history(self):
+        temp = User.objects.create_user("temp@bbms.test", password="pw")
+        audit(temp, "TEMP_EVENT", self.unit)
+        temp.delete()
+        event = AuditEvent.objects.get(event_type="TEMP_EVENT")
+        self.assertIsNone(event.actor)
+
+    def test_tc_s03_django_admin_is_view_only_even_for_superusers(self):
+        audit(self.staff, "TEST_EVENT", self.unit)
+        event = AuditEvent.objects.get(event_type="TEST_EVENT")
+        self.client.force_login(self.superuser)
+        self.assertEqual(self.client.get(f"/admin/bloodbank/auditevent/{event.pk}/change/").status_code, 200)
+        self.client.post(f"/admin/bloodbank/auditevent/{event.pk}/change/", {"outcome": "FAILED", "summary": "edited"})
+        self.assertEqual(self.client.get("/admin/bloodbank/auditevent/add/").status_code, 403)
+        self.assertEqual(self.client.post(f"/admin/bloodbank/auditevent/{event.pk}/delete/", {"post": "yes"}).status_code, 403)
+        event.refresh_from_db()
+        self.assertEqual((event.outcome, event.summary), ("SUCCESS", ""))
+        self.assertTrue(AuditEvent.objects.filter(pk=event.pk).exists())
+
+    def test_tc_s03_normal_roles_cannot_edit_audit_events(self):
+        audit(self.staff, "TEST_EVENT", self.unit)
+        event = AuditEvent.objects.get(event_type="TEST_EVENT")
+        self.client.force_login(self.staff)
+        self.assertEqual(self.client.post("/audit/", {"outcome": "FAILED"}).status_code, 405)
+        self.assertNotEqual(self.client.get(f"/admin/bloodbank/auditevent/{event.pk}/change/").status_code, 200)
+        self.assertNotEqual(self.client.post(f"/admin/bloodbank/auditevent/{event.pk}/delete/", {"post": "yes"}).status_code, 200)
+        event.refresh_from_db()
+        self.assertEqual(event.outcome, "SUCCESS")
+
+    def test_audit_page_shows_utc_time(self):
+        audit(self.staff, "TEST_EVENT", self.unit)
+        event = AuditEvent.objects.get(event_type="TEST_EVENT")
+        self.client.force_login(self.staff)
+        self.assertContains(self.client.get("/audit/"), f"{event.created_at:%Y-%m-%d %H:%M:%S} UTC")

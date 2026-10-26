@@ -630,6 +630,7 @@ def issue_view(request, pk):
 
 
 @login_required
+@require_http_methods(["GET"])
 def audit_view(request):
     if not allowed(request.user, STAFF):
         return deny(request.user)

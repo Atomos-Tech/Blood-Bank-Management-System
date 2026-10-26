@@ -23,7 +23,17 @@ class UserProfile(models.Model):
     active = models.BooleanField(default=True)
     def __str__(self): return f"{self.user.email} ({self.get_role_display()})"
 
+class ImmutableAuditRecord(Exception):
+    pass
+
+class AuditEventQuerySet(models.QuerySet):
+    # SEC-07: the audit trail is append-only through the application. Django's delete collector uses the
+    # plain base manager, so clearing actor/branch when a user or branch is deleted still works.
+    def update(self, **kwargs): raise ImmutableAuditRecord("Audit events cannot be changed.")
+    def delete(self): raise ImmutableAuditRecord("Audit events cannot be deleted.")
+
 class AuditEvent(models.Model):
+    objects = AuditEventQuerySet.as_manager()
     actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL)
     branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.SET_NULL)
     event_type = models.CharField(max_length=100)
@@ -33,6 +43,13 @@ class AuditEvent(models.Model):
     summary = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta: ordering = ["-created_at"]
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutableAuditRecord("Audit events cannot be changed.")
+        if not (self.event_type and self.record_id and self.outcome):
+            raise ValueError("An audit event needs an event type, a record ID and an outcome.")
+        super().save(*args, **kwargs)
+    def delete(self, *args, **kwargs): raise ImmutableAuditRecord("Audit events cannot be deleted.")
 
 class Donor(models.Model):
     user = models.OneToOneField(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="donor_profile")
