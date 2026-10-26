@@ -128,6 +128,13 @@ class Appointment(models.Model):
     slot = models.ForeignKey(AppointmentSlot, on_delete=models.PROTECT, related_name="appointments")
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.BOOKED)
     created_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+        constraints = [
+            # FR-06: a donor can hold at most one active booking for the same slot.
+            models.UniqueConstraint(
+                fields=["donor", "slot"], condition=Q(status="BOOKED"), name="unique_active_booking_per_donor_slot",
+            )
+        ]
 
 class Donation(models.Model):
     donation_id = models.CharField(max_length=32, unique=True)

@@ -26,7 +26,10 @@ if os.environ.get("BBMS_DB_ENGINE") == "postgresql":
     DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql", "NAME": os.environ["POSTGRES_DB"], "USER": os.environ["POSTGRES_USER"], "PASSWORD": os.environ["POSTGRES_PASSWORD"], "HOST": os.environ.get("POSTGRES_HOST", "db"), "PORT": os.environ.get("POSTGRES_PORT", "5432")}}
 else:
     (BASE_DIR / "data").mkdir(parents=True, exist_ok=True)
-    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "data" / "bbms.sqlite3", "OPTIONS": {"timeout": 30}}}
+    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "data" / "bbms.sqlite3", "OPTIONS": {"timeout": 30},
+                            # A file-backed test database lets the TC-F03 concurrency test use real SQLite locking;
+                            # the default in-memory shared cache raises "table is locked" instead of waiting.
+                            "TEST": {"NAME": BASE_DIR / "data" / "test_bbms.sqlite3"}}}
 
 AUTH_PASSWORD_VALIDATORS = [{"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"}, {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"}, {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"}, {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"}]
 LANGUAGE_CODE = "en-us"

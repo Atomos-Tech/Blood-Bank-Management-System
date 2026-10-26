@@ -1,7 +1,7 @@
 from datetime import timedelta
 import uuid
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, F, Q
 from django.core.mail import send_mail
 from django.utils import timezone
 from .models import (COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation, DonationType,
@@ -149,6 +149,17 @@ class AppointmentError(ValueError):
     pass
 
 
+def _lock_slot(slot):
+    """FR-06: take a write lock on the slot row before counting bookings.
+
+    The no-op UPDATE holds a row lock on PostgreSQL and the database write lock on SQLite until the
+    transaction ends, so two bookings for the same slot are counted one after the other, never in parallel.
+    """
+    from .models import AppointmentSlot
+    AppointmentSlot.objects.filter(pk=slot.pk).update(capacity=F("capacity"))
+    return AppointmentSlot.objects.select_for_update().select_related("branch").get(pk=slot.pk)
+
+
 def _check_slot_bookable(donor, slot, ignore=None):
     if slot.starts_at <= timezone.now():
         raise AppointmentError("This slot is in the past. Choose a future slot.")
@@ -166,11 +177,15 @@ def _slot_text(slot):
 
 
 def book_appointment(donor, slot, user):
-    """FR-05: book an eligible donor into a future slot with free capacity; audited and confirmed by email."""
-    with transaction.atomic():
-        _check_slot_bookable(donor, slot)
-        appointment = Appointment.objects.create(donor=donor, slot=slot)
-        audit(user, "APPOINTMENT_BOOKED", appointment, summary=_slot_text(slot), branch=slot.branch)
+    """FR-05 / FR-06: book an eligible donor into a future slot with free capacity; audited and confirmed by email."""
+    try:
+        with transaction.atomic():
+            slot = _lock_slot(slot)
+            _check_slot_bookable(donor, slot)
+            appointment = Appointment.objects.create(donor=donor, slot=slot)
+            audit(user, "APPOINTMENT_BOOKED", appointment, summary=_slot_text(slot), branch=slot.branch)
+    except IntegrityError:
+        raise AppointmentError("The donor already has a booking for this slot.")
     notify(donor.email, "Donation appointment confirmed", f"Your appointment is booked at {_slot_text(slot)}.")
     return appointment
 
@@ -183,6 +198,7 @@ def reschedule_appointment(appointment, new_slot, user):
         raise AppointmentError("Choose a different slot to reschedule.")
     old_slot = appointment.slot
     with transaction.atomic():
+        new_slot = _lock_slot(new_slot)
         _check_slot_bookable(appointment.donor, new_slot, ignore=appointment)
         appointment.slot = new_slot
         appointment.save(update_fields=["slot"])

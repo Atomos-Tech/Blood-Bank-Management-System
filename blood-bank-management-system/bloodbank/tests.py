@@ -9,7 +9,10 @@ from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.db import IntegrityError
-from django.test import TestCase
+import threading
+
+from django.db import connection
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
 from .models import (
@@ -37,6 +40,9 @@ from .models import (
     UserProfile,
 )
 from .services import (
+    AppointmentError,
+    book_appointment,
+    cancel_appointment,
     next_eligible_date,
     calculate_expiry,
     UNIT_TRANSITIONS,
@@ -2620,3 +2626,94 @@ class AppointmentLifecycleTests(TestCase):
         ap.refresh_from_db()
         self.assertEqual(ap.slot, self.slot_a)
         self.assertFalse(AuditEvent.objects.filter(event_type="APPOINTMENT_CANCELLED").exists())
+
+
+class SlotCapacityTests(TestCase):
+    """BB-13 [FR-06] / TC-F03: slot capacity is never exceeded."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Cap Branch", code="CAP")
+        self.staff = User.objects.create_user("capstaff@bbms.test", email="capstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.slot = AppointmentSlot.objects.create(branch=self.branch, starts_at=timezone.now() + timedelta(days=1), capacity=1)
+        self.d1, self.d2 = [
+            Donor.objects.create(
+                branch=self.branch, full_name=f"Cap {i}", email=f"cap{i}@example.test", phone="9000000777",
+                date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="A-", consent_given=True,
+            )
+            for i in (1, 2)
+        ]
+
+    def test_tc_f03_full_slot_rejects_then_accepts_after_cancellation(self):
+        first = book_appointment(self.d1, self.slot, self.staff)
+        with self.assertRaisesMessage(AppointmentError, "This slot is full."):
+            book_appointment(self.d2, self.slot, self.staff)
+        cancel_appointment(first, self.staff)
+        second = book_appointment(self.d2, self.slot, self.staff)
+        self.assertEqual(self.slot.appointments.filter(status=Appointment.Status.BOOKED).get(), second)
+
+    def test_donor_cannot_hold_two_active_bookings_for_same_slot(self):
+        self.slot.capacity = 3
+        self.slot.save()
+        book_appointment(self.d1, self.slot, self.staff)
+        with self.assertRaisesMessage(AppointmentError, "already has a booking for this slot"):
+            book_appointment(self.d1, self.slot, self.staff)
+        with self.assertRaises(IntegrityError):
+            Appointment.objects.create(donor=self.d1, slot=self.slot)
+
+    def test_cancelled_booking_does_not_block_rebooking_same_slot(self):
+        first = book_appointment(self.d1, self.slot, self.staff)
+        cancel_appointment(first, self.staff)
+        book_appointment(self.d1, self.slot, self.staff)
+        self.assertEqual(self.slot.appointments.count(), 2)
+
+
+class ConcurrentSlotBookingTests(TransactionTestCase):
+    """BB-13 [FR-06] / TC-F03: parallel booking requests never exceed slot capacity."""
+
+    WORKERS = 8
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Race Branch", code="RACE")
+        self.staff = User.objects.create_user("racestaff@bbms.test", email="racestaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.donors = [
+            Donor.objects.create(
+                branch=self.branch, full_name=f"Race {i}", email=f"race{i}@example.test", phone="9000000888",
+                date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="B+", consent_given=True,
+            )
+            for i in range(self.WORKERS)
+        ]
+
+    def race(self, capacity):
+        slot = AppointmentSlot.objects.create(
+            branch=self.branch, starts_at=timezone.now() + timedelta(days=1, minutes=capacity), capacity=capacity
+        )
+        barrier = threading.Barrier(self.WORKERS)
+        outcomes = []
+
+        def attempt(donor):
+            try:
+                barrier.wait()
+                book_appointment(donor, slot, self.staff)
+                outcomes.append("booked")
+            except AppointmentError:
+                outcomes.append("full")
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=attempt, args=(d,)) for d in self.donors]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return slot, outcomes
+
+    def test_tc_f03_parallel_bookings_never_exceed_capacity(self):
+        for capacity in (1, 3):
+            with self.subTest(capacity=capacity):
+                slot, outcomes = self.race(capacity)
+                booked = Appointment.objects.filter(slot=slot, status=Appointment.Status.BOOKED).count()
+                self.assertEqual(booked, capacity)
+                self.assertEqual(outcomes.count("booked"), capacity)
+                self.assertEqual(outcomes.count("full"), self.WORKERS - capacity)
