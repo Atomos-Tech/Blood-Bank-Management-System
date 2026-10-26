@@ -24,6 +24,53 @@ def audit(user, event_type, record, outcome="SUCCESS", summary="", branch=None):
     )
 
 
+_U = BloodUnit.Status
+# SADS 4.1 unit state machine: the only permitted moves out of each state.
+UNIT_TRANSITIONS = {
+    _U.COLLECTED: {_U.TESTING, _U.DISCARDED},
+    _U.TESTING: {_U.AVAILABLE, _U.QUARANTINED, _U.DISCARDED},
+    _U.AVAILABLE: {_U.RESERVED, _U.EXPIRED, _U.DISCARDED},
+    _U.RESERVED: {_U.AVAILABLE, _U.ISSUED, _U.EXPIRED},
+    _U.ISSUED: set(),
+    _U.QUARANTINED: {_U.DISCARDED},
+    _U.EXPIRED: {_U.DISCARDED},
+    _U.DISCARDED: set(),
+}
+
+
+class InvalidUnitTransition(ValueError):
+    pass
+
+
+def transition_unit(unit, next_status, user, reason="", event_type="UNIT_STATUS_CHANGED"):
+    """FR-14: the single place a blood unit changes state. Every attempt is audited."""
+    current = unit.status
+    summary = f"{current} to {next_status}" + (f"; {reason}" if reason else "")
+    if next_status not in UNIT_TRANSITIONS.get(current, set()):
+        audit(user, "UNIT_TRANSITION_REJECTED", unit, outcome="REJECTED", summary=summary, branch=unit.branch)
+        raise InvalidUnitTransition(
+            f"Unit {unit.unit_id} cannot move from {_U(current).label} to {_U(next_status).label}."
+        )
+    with transaction.atomic():
+        unit.status = next_status
+        unit.save(update_fields=["status"])
+        audit(user, event_type, unit, summary=summary, branch=unit.branch)
+    return unit
+
+
+def release_target(unit):
+    """A released reservation returns the unit to stock unless it has passed expiry meanwhile."""
+    return _U.AVAILABLE if unit.expiry_at > timezone.now() else _U.EXPIRED
+
+
+def discard_unit(unit, user, reason):
+    """FR-14: authorized disposal; the state machine decides which states may be discarded."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("A disposal reason is required.")
+    return transition_unit(unit, _U.DISCARDED, user, reason=reason, event_type="UNIT_DISCARDED")
+
+
 def notify(recipient, subject, body):
     notification = Notification.objects.create(recipient=recipient, subject=subject, body=body)
     try:
@@ -149,12 +196,13 @@ def transition_request(request, next_status, user):
             res.active = False
             res.save(update_fields=["active"])
             if res.unit.status == BloodUnit.Status.RESERVED:
-                res.unit.status = (
-                    BloodUnit.Status.AVAILABLE
-                    if res.unit.expiry_at > timezone.now()
-                    else BloodUnit.Status.EXPIRED
+                transition_unit(
+                    res.unit,
+                    release_target(res.unit),
+                    user,
+                    reason=f"Request {request.pk} cancelled",
+                    event_type="RESERVATION_RELEASED",
                 )
-                res.unit.save(update_fields=["status"])
     audit(user, "REQUEST_STATUS_CHANGED", request, summary=f"{old} to {next_status}", branch=request.branch)
     notify(
         request.created_by.email,
@@ -189,10 +237,8 @@ def reserve_units(request, user):
         raise ValueError("No compatible available units are available.")
     made = []
     for unit in candidates:
-        unit.status = BloodUnit.Status.RESERVED
-        unit.save(update_fields=["status"])
+        transition_unit(unit, BloodUnit.Status.RESERVED, user, reason=f"Request {request.pk}", event_type="UNIT_RESERVED")
         made.append(Reservation.objects.create(unit=unit, request=request, reserved_by=user, active=True))
-        audit(user, "UNIT_RESERVED", unit, summary=f"Request {request.pk}", branch=unit.branch)
     return made
 
 
@@ -204,13 +250,11 @@ def release_reservation(reservation, user, reason="Reservation released"):
     reservation.active = False
     reservation.save(update_fields=["active"])
     if reservation.unit.status == BloodUnit.Status.RESERVED:
-        reservation.unit.status = (
-            BloodUnit.Status.AVAILABLE
-            if reservation.unit.expiry_at > timezone.now()
-            else BloodUnit.Status.EXPIRED
+        transition_unit(
+            reservation.unit, release_target(reservation.unit), user, reason=reason, event_type="RESERVATION_RELEASED"
         )
-        reservation.unit.save(update_fields=["status"])
-    audit(user, "RESERVATION_RELEASED", reservation.unit, summary=reason, branch=reservation.unit.branch)
+    else:
+        audit(user, "RESERVATION_RELEASED", reservation.unit, summary=reason, branch=reservation.unit.branch)
     return reservation.unit
 
 
@@ -228,40 +272,40 @@ def issue_reservation(reservation, user):
     Issue.objects.create(reservation=reservation, issued_by=user)
     reservation.active = False
     reservation.save(update_fields=["active"])
-    reservation.unit.status = BloodUnit.Status.ISSUED
-    reservation.unit.save(update_fields=["status"])
+    transition_unit(
+        reservation.unit,
+        BloodUnit.Status.ISSUED,
+        user,
+        reason=f"Request {reservation.request.pk}",
+        event_type="UNIT_ISSUED",
+    )
     issued = reservation.request.reservations.filter(issue__isnull=False).count()
     remaining = reservation.request.quantity - issued
     if remaining <= 0 and reservation.request.status != BloodRequest.Status.FULFILLED:
         transition_request(reservation.request, BloodRequest.Status.FULFILLED, user)
     elif remaining > 0 and reservation.request.status == BloodRequest.Status.APPROVED:
         transition_request(reservation.request, BloodRequest.Status.PARTIAL, user)
-    audit(
-        user,
-        "UNIT_ISSUED",
-        reservation.unit,
-        summary=f"Request {reservation.request.pk}",
-        branch=reservation.unit.branch,
-    )
 
 
 @transaction.atomic
 def release_screened_unit(unit, user):
+    if unit.status == BloodUnit.Status.COLLECTED:
+        transition_unit(unit, BloodUnit.Status.TESTING, user, reason="Screening started")
     required = set(TestType.objects.filter(required=True).values_list("id", flat=True))
     outcomes = dict(unit.lab_results.values_list("test_type_id", "outcome"))
     if not required.issubset(outcomes):
-        unit.status = BloodUnit.Status.QUARANTINED
+        target = BloodUnit.Status.QUARANTINED
     elif any(
         outcomes[t] in (LabResult.Outcome.REACTIVE, LabResult.Outcome.INDETERMINATE, LabResult.Outcome.INCOMPLETE)
         for t in required
     ):
-        unit.status = BloodUnit.Status.QUARANTINED
+        target = BloodUnit.Status.QUARANTINED
     elif all(outcomes[t] == LabResult.Outcome.ACCEPTABLE for t in required):
-        unit.status = BloodUnit.Status.AVAILABLE
+        target = BloodUnit.Status.AVAILABLE
     else:
-        unit.status = BloodUnit.Status.TESTING
-    unit.save(update_fields=["status"])
-    audit(user, "SCREENING_REVIEWED", unit, summary=unit.status, branch=unit.branch)
+        target = BloodUnit.Status.TESTING
+    if target != unit.status:
+        transition_unit(unit, target, user, event_type="SCREENING_REVIEWED")
     return unit.status
 
 
@@ -273,7 +317,12 @@ def expire_units():
     )
     if not expired_qs.exists():
         return 0
-    return expired_qs.update(status=BloodUnit.Status.EXPIRED)
+    count = 0
+    with transaction.atomic():
+        for unit in expired_qs.select_for_update().select_related("branch"):
+            transition_unit(unit, BloodUnit.Status.EXPIRED, None, reason="Expiry time reached", event_type="UNIT_EXPIRED")
+            count += 1
+    return count
 
 
 def get_branch_warnings(branch=None, limit=None, run_expire=True):

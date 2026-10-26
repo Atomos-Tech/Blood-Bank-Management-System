@@ -34,7 +34,11 @@ from .models import (
 )
 from .services import (
     calculate_expiry,
+    UNIT_TRANSITIONS,
+    InvalidUnitTransition,
     check_stock_and_expiry_alerts,
+    discard_unit,
+    expire_units,
     record_donation,
     eligibility,
     issue_reservation,
@@ -42,6 +46,7 @@ from .services import (
     release_screened_unit,
     reserve_units,
     transition_request,
+    transition_unit,
 )
 
 
@@ -1138,3 +1143,151 @@ class UniqueDonationAndUnitIdentifierTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(Donation.objects.count(), 1)
         self.assertEqual(set(BloodUnit.objects.values_list("component", flat=True)), {"Packed Red Cells", "Plasma"})
+
+
+class UnitStateTransitionTests(TestCase):
+    """BB-21 [FR-14] & TC-F08: Enforce valid blood unit state transitions."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="State Branch", code="STAT")
+        self.staff = User.objects.create_user("statestaff@bbms.test", email="statestaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.hospital = User.objects.create_user("statehosp@bbms.test", email="statehosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="State Hospital"
+        )
+        donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="State Donor",
+            email="statedonor@example.test",
+            phone="9000000104",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="AB+",
+            consent_given=True,
+        )
+        self.donation = Donation.objects.create(
+            donation_id="DON-STATE-1", donor=donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+        self.counter = 0
+
+    def make_unit(self, status=BloodUnit.Status.COLLECTED, expiry_days=20):
+        self.counter += 1
+        return BloodUnit.objects.create(
+            unit_id=f"UNIT-STATE-{self.counter}",
+            donation=self.donation,
+            blood_group="AB+",
+            component="Plasma",
+            volume_ml=220,
+            expiry_at=timezone.now() + timedelta(days=expiry_days),
+            branch=self.branch,
+            status=status,
+        )
+
+    def test_tc_f08_all_eight_states_exist(self):
+        self.assertEqual(
+            set(BloodUnit.Status.values),
+            {"COLLECTED", "TESTING", "AVAILABLE", "RESERVED", "ISSUED", "QUARANTINED", "EXPIRED", "DISCARDED"},
+        )
+        self.assertEqual(set(UNIT_TRANSITIONS), set(BloodUnit.Status.values))
+
+    def test_tc_f08_every_pair_is_checked_against_the_allowed_map(self):
+        for current in BloodUnit.Status.values:
+            for target in BloodUnit.Status.values:
+                unit = self.make_unit(status=current)
+                if target in UNIT_TRANSITIONS[current]:
+                    transition_unit(unit, target, self.staff)
+                    unit.refresh_from_db()
+                    self.assertEqual(unit.status, target, f"{current} -> {target}")
+                else:
+                    with self.assertRaises(InvalidUnitTransition, msg=f"{current} -> {target}"):
+                        transition_unit(unit, target, self.staff)
+                    unit.refresh_from_db()
+                    self.assertEqual(unit.status, current, f"{current} -> {target}")
+
+    def test_tc_f08_invalid_collected_to_issued_is_rejected_and_logged(self):
+        unit = self.make_unit()
+        with self.assertRaisesMessage(InvalidUnitTransition, "cannot move from Collected to Issued"):
+            transition_unit(unit, BloodUnit.Status.ISSUED, self.staff)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.COLLECTED)
+        event = AuditEvent.objects.get(event_type="UNIT_TRANSITION_REJECTED")
+        self.assertEqual((event.actor, event.record_id, event.outcome), (self.staff, str(unit.pk), "REJECTED"))
+        self.assertIn("COLLECTED to ISSUED", event.summary)
+
+    def test_every_successful_transition_is_audited(self):
+        unit = self.make_unit()
+        transition_unit(unit, BloodUnit.Status.TESTING, self.staff)
+        transition_unit(unit, BloodUnit.Status.AVAILABLE, self.staff)
+        summaries = list(
+            AuditEvent.objects.filter(record_type="BloodUnit", record_id=str(unit.pk), outcome="SUCCESS")
+            .order_by("id")
+            .values_list("summary", flat=True)
+        )
+        self.assertEqual(summaries, ["COLLECTED to TESTING", "TESTING to AVAILABLE"])
+
+    def test_reserve_and_issue_go_through_the_state_machine(self):
+        unit = self.make_unit(status=BloodUnit.Status.AVAILABLE)
+        req = BloodRequest.objects.create(
+            hospital="State Hospital",
+            created_by=self.hospital,
+            branch=self.branch,
+            blood_group="AB+",
+            component="Plasma",
+            quantity=1,
+            priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1),
+            clinical_reference="REF-STATE",
+            status=BloodRequest.Status.APPROVED,
+        )
+        reservation = reserve_units(req, self.staff)[0]
+        CrossMatch.objects.create(reservation=reservation, outcome="COMPATIBLE", recorded_by=self.staff)
+        issue_reservation(reservation, self.staff)
+        events = list(
+            AuditEvent.objects.filter(record_type="BloodUnit", record_id=str(unit.pk))
+            .order_by("id")
+            .values_list("event_type", "summary")
+        )
+        self.assertEqual(events[0][0], "UNIT_RESERVED")
+        self.assertTrue(events[0][1].startswith("AVAILABLE to RESERVED"))
+        self.assertEqual(events[1][0], "UNIT_ISSUED")
+        self.assertTrue(events[1][1].startswith("RESERVED to ISSUED"))
+
+    def test_staff_discard_quarantined_and_expired_units_with_reason(self):
+        quarantined = self.make_unit(status=BloodUnit.Status.QUARANTINED)
+        expired = self.make_unit(status=BloodUnit.Status.EXPIRED)
+        self.client.force_login(self.staff)
+        for unit in (quarantined, expired):
+            resp = self.client.post(f"/inventory/{unit.pk}/discard/", {"reason": "Reactive HIV result"})
+            self.assertEqual(resp.status_code, 302)
+            unit.refresh_from_db()
+            self.assertEqual(unit.status, BloodUnit.Status.DISCARDED)
+        self.assertEqual(AuditEvent.objects.filter(event_type="UNIT_DISCARDED").count(), 2)
+
+    def test_discard_requires_reason_and_allowed_state(self):
+        issued = self.make_unit(status=BloodUnit.Status.ISSUED)
+        quarantined = self.make_unit(status=BloodUnit.Status.QUARANTINED)
+        with self.assertRaisesMessage(ValueError, "A disposal reason is required."):
+            discard_unit(quarantined, self.staff, "  ")
+        with self.assertRaises(InvalidUnitTransition):
+            discard_unit(issued, self.staff, "Damaged bag")
+        issued.refresh_from_db()
+        quarantined.refresh_from_db()
+        self.assertEqual(issued.status, BloodUnit.Status.ISSUED)
+        self.assertEqual(quarantined.status, BloodUnit.Status.QUARANTINED)
+
+    def test_hospital_staff_cannot_discard(self):
+        unit = self.make_unit(status=BloodUnit.Status.QUARANTINED)
+        self.client.force_login(self.hospital)
+        self.assertEqual(self.client.post(f"/inventory/{unit.pk}/discard/", {"reason": "x"}).status_code, 403)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.QUARANTINED)
+
+    def test_expiry_task_moves_units_through_the_state_machine(self):
+        unit = self.make_unit(status=BloodUnit.Status.AVAILABLE, expiry_days=-1)
+        self.assertEqual(expire_units(), 1)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.EXPIRED)
+        self.assertTrue(
+            AuditEvent.objects.filter(event_type="UNIT_EXPIRED", record_id=str(unit.pk), actor=None).exists()
+        )

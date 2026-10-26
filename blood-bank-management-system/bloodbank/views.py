@@ -17,7 +17,7 @@ from .forms import (AppointmentForm, BloodRequestForm, CrossMatchForm, DeferralF
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
                      Reservation, TestType, UserProfile)
-from .services import (audit, check_stock_and_expiry_alerts, eligibility, expire_units, record_donation,
+from .services import (audit, check_stock_and_expiry_alerts, discard_unit, eligibility, expire_units, record_donation,
                        get_branch_warnings, issue_reservation, notify, release_reservation,
                        release_screened_unit, reserve_units, transition_request)
 
@@ -444,6 +444,22 @@ def screening_view(request, pk):
         "bloodbank/screening.html",
         {"unit": unit, "form": form, "results": unit.lab_results.select_related("test_type")},
     )
+
+
+@login_required
+@require_POST
+def discard_view(request, pk):
+    if not allowed(request.user, STAFF):
+        return deny(request.user)
+    unit = get_object_or_404(BloodUnit.objects.select_related("branch"), pk=pk)
+    if not in_branch_scope(request.user, unit.branch_id):
+        return deny(request.user, "Cross-branch unit disposal denied")
+    try:
+        discard_unit(unit, request.user, request.POST.get("reason", ""))
+        messages.success(request, f"Unit {unit.unit_id} discarded.")
+    except ValueError as e:
+        messages.error(request, str(e))
+    return redirect("inventory")
 
 
 @login_required
