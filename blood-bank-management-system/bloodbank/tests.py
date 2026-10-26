@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 import importlib
 from io import StringIO
 import json
@@ -1937,3 +1937,95 @@ class RolePermissionMatrixTests(TestCase):
         self.client.force_login(staff)
         self.assertEqual(self.client.get("/inventory/").status_code, 403)
         self.assertEqual(self.client.post(f"/requests/{self.pending.pk}/approve/").status_code, 403)
+
+
+class BranchTimezoneDisplayTests(TestCase):
+    """BB-47 [NFR-10] & TC-N07: Store UTC and display branch local time."""
+
+    def setUp(self):
+        self.kolkata = Branch.objects.create(name="Kolkata Branch", code="KOL", timezone_name="Asia/Kolkata")
+        self.utc_branch = Branch.objects.create(name="UTC Branch", code="UTCB", timezone_name="UTC")
+        self.staff_kol = User.objects.create_user("tzstaff@bbms.test", email="tzstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff_kol, role=UserProfile.Role.STAFF, branch=self.kolkata)
+        self.staff_utc = User.objects.create_user("tzutc@bbms.test", email="tzutc@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff_utc, role=UserProfile.Role.STAFF, branch=self.utc_branch)
+        self.hosp_kol = User.objects.create_user("tzhosp@bbms.test", email="tzhosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hosp_kol, role=UserProfile.Role.HOSPITAL, branch=self.kolkata, hospital_name="Kolkata Hospital"
+        )
+        donor = Donor.objects.create(
+            branch=self.kolkata,
+            full_name="TZ Donor",
+            email="tzdonor@example.test",
+            phone="9000000109",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="A+",
+            consent_given=True,
+        )
+        self.expiry = datetime(2030, 1, 1, 0, 0, tzinfo=dt_timezone.utc)
+        for branch, unit_id in [(self.kolkata, "UNIT-TZ-KOL"), (self.utc_branch, "UNIT-TZ-UTC")]:
+            donation = Donation.objects.create(
+                donation_id=f"DON-{unit_id}", donor=donor, collected_at=timezone.now(), collector=self.staff_kol, branch=branch
+            )
+            BloodUnit.objects.create(
+                unit_id=unit_id,
+                donation=donation,
+                blood_group="A+",
+                component="Plasma",
+                volume_ml=220,
+                expiry_at=self.expiry,
+                branch=branch,
+                status=BloodUnit.Status.AVAILABLE,
+            )
+
+    def test_tc_n07_settings_store_utc(self):
+        from django.conf import settings
+        self.assertTrue(settings.USE_TZ)
+        self.assertEqual(settings.TIME_ZONE, "UTC")
+        self.assertEqual(BloodUnit.objects.get(unit_id="UNIT-TZ-KOL").expiry_at, self.expiry)
+
+    def test_tc_n07_same_instant_shown_in_each_branch_time_zone(self):
+        self.client.force_login(self.staff_kol)
+        kol_page = self.client.get("/inventory/")
+        self.assertContains(kol_page, "Jan. 1, 2030, 5:30 a.m.")
+        self.assertContains(kol_page, "Times shown in Asia/Kolkata")
+
+        self.client.force_login(self.staff_utc)
+        utc_page = self.client.get("/inventory/")
+        self.assertContains(utc_page, "Jan. 1, 2030, midnight")
+        self.assertContains(utc_page, "Times shown in UTC")
+
+    def test_tc_n07_branch_local_form_input_is_stored_in_utc(self):
+        self.client.force_login(self.hosp_kol)
+        resp = self.client.post(
+            "/requests/",
+            {
+                "branch": self.kolkata.pk,
+                "blood_group": "A+",
+                "component": "Plasma",
+                "quantity": 1,
+                "priority": "Urgent",
+                "required_by": "2030-01-01 10:00",
+                "clinical_reference": "REF-TZ",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        stored = BloodRequest.objects.get(clinical_reference="REF-TZ").required_by
+        self.assertEqual(stored, datetime(2030, 1, 1, 4, 30, tzinfo=dt_timezone.utc))
+
+    def test_unknown_or_missing_time_zone_falls_back_to_utc(self):
+        self.kolkata.timezone_name = "Not/AZone"
+        self.kolkata.save()
+        self.client.force_login(self.staff_kol)
+        self.assertContains(self.client.get("/inventory/"), "Jan. 1, 2030, midnight")
+
+        admin = User.objects.create_user("tzadmin@bbms.test", email="tzadmin@bbms.test", password="pw")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+        self.assertContains(self.client.get("/inventory/"), "Times shown in UTC")
+
+    def test_time_zone_is_reset_after_each_request(self):
+        self.client.force_login(self.staff_kol)
+        self.client.get("/inventory/")
+        self.assertEqual(timezone.get_current_timezone_name(), "UTC")
