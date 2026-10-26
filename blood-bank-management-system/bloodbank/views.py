@@ -416,6 +416,7 @@ def donation_view(request):
                 collector=request.user,
                 blood_group=data["blood_group"],
                 components=data["components"],
+                donation_type=data["donation_type"],
             )
         except ValueError as e:
             form.add_error(None, str(e))

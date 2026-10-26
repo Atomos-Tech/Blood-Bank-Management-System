@@ -23,6 +23,7 @@ from .models import (
     CrossMatch,
     Deferral,
     Donation,
+    DonationType,
     Donor,
     EligibilityRule,
     ImmutableAuditRecord,
@@ -36,6 +37,7 @@ from .models import (
     UserProfile,
 )
 from .services import (
+    next_eligible_date,
     calculate_expiry,
     UNIT_TRANSITIONS,
     DuplicateLabResult,
@@ -2318,3 +2320,88 @@ class DonorRegistrationValidationTests(TestCase):
         for phone in ["12345", "98450abcde", "+91 98450 12345 67890"]:
             with self.subTest(phone=phone):
                 self.assert_rejected(self.payload(phone=phone), "Enter a valid phone number")
+
+
+class ConfiguredEligibilityRuleTests(TestCase):
+    """BB-10 [FR-03] / TC-F02: eligibility uses the administrator-configured rule, donation type and screening."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Rule Branch", code="RULE")
+        self.staff = User.objects.create_user("rulestaff@bbms.test", email="rulestaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.rule = EligibilityRule.objects.create(
+            min_age=18, max_age=65, min_weight_kg=50,
+            minimum_interval_days=90, platelets_interval_days=14, plasma_interval_days=28,
+        )
+        self.donor = Donor.objects.create(
+            branch=self.branch, full_name="Rule Donor", email="rule@example.test", phone="9000000222",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=60, blood_group="A+",
+            consent_given=True, screening_responses={key: False for key, _ in SCREENING_QUESTIONS},
+        )
+
+    def donate(self, days_ago, donation_type):
+        return Donation.objects.create(
+            donation_id=f"DON-RULE-{days_ago}-{donation_type}", donor=self.donor,
+            collected_at=timezone.now() - timedelta(days=days_ago), collector=self.staff,
+            branch=self.branch, donation_type=donation_type,
+        )
+
+    def test_tc_f02_age_boundaries_min_and_max(self):
+        cases = [(18, 0, True), (18, 1, False), (65, 0, True), (66, 0, False)]
+        for age, offset, expected in cases:
+            with self.subTest(age=age, offset=offset):
+                self.donor.date_of_birth = EligibilityRuleUnitTests.birthday(age, days_offset=offset)
+                self.assertEqual(eligibility(self.donor)[0], expected)
+
+    def test_tc_f02_weight_boundary(self):
+        for weight, expected in [(50, True), (49.9, False), (120, True)]:
+            with self.subTest(weight=weight):
+                self.donor.weight_kg = weight
+                self.assertEqual(eligibility(self.donor)[0], expected)
+
+    def test_interval_depends_on_previous_donation_type(self):
+        self.donate(20, DonationType.PLATELETS)
+        self.assertTrue(eligibility(self.donor)[0])
+        Donation.objects.all().delete()
+        self.donate(20, DonationType.PLASMA)
+        ok, reasons = eligibility(self.donor)
+        self.assertFalse(ok)
+        self.assertIn("Minimum donation interval has not elapsed", reasons[0])
+        Donation.objects.all().delete()
+        self.donate(60, DonationType.WHOLE_BLOOD)
+        self.assertFalse(eligibility(self.donor)[0])
+
+    def test_intervals_come_from_configuration(self):
+        self.donate(20, DonationType.PLATELETS)
+        self.rule.platelets_interval_days = 30
+        self.rule.save()
+        self.assertFalse(eligibility(self.donor)[0])
+
+    def test_next_eligible_date_uses_latest_constraint(self):
+        whole = self.donate(10, DonationType.WHOLE_BLOOD)
+        self.donate(5, DonationType.PLATELETS)
+        expected = timezone.localdate(whole.collected_at) + timedelta(days=90)
+        self.assertEqual(next_eligible_date(self.donor), expected)
+
+    def test_failed_screening_questionnaire_blocks(self):
+        self.donor.screening_responses["recent_tattoo"] = True
+        ok, reasons = eligibility(self.donor)
+        self.assertFalse(ok)
+        self.assertIn("Tattoo, piercing or acupuncture", reasons[0])
+        self.assertNotIn(self.donor.medical_history or "asthma", " ".join(reasons))
+
+    def test_active_deferral_blocks(self):
+        Deferral.objects.create(
+            donor=self.donor, reason="Low haemoglobin", end_date=timezone.localdate() + timedelta(days=7),
+            approved_by=self.staff,
+        )
+        self.assertIn("An active donor deferral applies.", eligibility(self.donor)[1])
+
+    def test_donation_form_records_donation_type(self):
+        ShelfLifeRule.objects.create(component="Plasma", days=365)
+        self.client.force_login(self.staff)
+        self.client.post("/donations/new/", {
+            "donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "A+",
+            "donation_type": DonationType.PLASMA, "volume_pls": 250,
+        })
+        self.assertEqual(Donation.objects.get().donation_type, DonationType.PLASMA)

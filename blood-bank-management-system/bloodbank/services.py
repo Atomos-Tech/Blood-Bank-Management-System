@@ -4,7 +4,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.core.mail import send_mail
 from django.utils import timezone
-from .models import (COMPONENT_CODES, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation,
+from .models import (COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation, DonationType,
                      EligibilityRule, Issue, LabResult, Notification, Reservation, RequestTransition,
                      ShelfLifeRule, TestType, UserProfile)
 
@@ -97,7 +97,8 @@ def new_donation_id(collected_at):
     return f"DON-{collected_at:%Y%m%d}-{uuid.uuid4().hex[:12].upper()}"
 
 
-def record_donation(donor, branch, collector, blood_group, components, collected_at=None):
+def record_donation(donor, branch, collector, blood_group, components, collected_at=None,
+                    donation_type=DonationType.WHOLE_BLOOD):
     """FR-09, FR-10, FR-15: record one donation and one uniquely identified unit per prepared component.
 
     `components` maps component name to volume in ml. Every unit links back to the donation and so
@@ -116,6 +117,7 @@ def record_donation(donor, branch, collector, blood_group, components, collected
                     collected_at=collected_at,
                     collector=collector,
                     branch=branch,
+                    donation_type=donation_type,
                 )
                 units = [
                     BloodUnit.objects.create(
@@ -143,9 +145,26 @@ def record_donation(donor, branch, collector, blood_group, components, collected
                 raise
 
 
+def active_eligibility_rule():
+    return EligibilityRule.objects.filter(active=True).order_by("id").first()
+
+
+def next_eligible_date(donor, rule=None):
+    """FR-03 / FR-07: the earliest date the donor may give again, using the interval for each past donation type."""
+    rule = rule or active_eligibility_rule()
+    if not rule:
+        return None
+    dates = [
+        timezone.localdate(d.collected_at) + timedelta(days=rule.interval_for(d.donation_type))
+        for d in donor.donations.all()
+    ]
+    return max(dates) if dates else None
+
+
 def eligibility(donor):
+    """FR-03 / FR-04: evaluate every administrator-configured rule and return all failures, not just the first."""
     reasons = []
-    rule = EligibilityRule.objects.filter(active=True).order_by("id").first()
+    rule = active_eligibility_rule()
     if not rule:
         reasons.append("Eligibility rules have not been configured.")
     else:
@@ -157,13 +176,17 @@ def eligibility(donor):
             reasons.append(f"Age must be between {rule.min_age} and {rule.max_age} years.")
         if donor.weight_kg < rule.min_weight_kg:
             reasons.append(f"Weight must be at least {rule.min_weight_kg} kg.")
-        latest = donor.donations.order_by("-collected_at").first()
-        if latest and latest.collected_at.date() + timedelta(days=rule.minimum_interval_days) > today:
-            reasons.append("Minimum donation interval has not elapsed.")
+        next_date = next_eligible_date(donor, rule)
+        if next_date and next_date > today:
+            reasons.append(f"Minimum donation interval has not elapsed. Next eligible date: {next_date:%d %b %Y}.")
     if not donor.consent_given:
         reasons.append("Donor consent is required.")
     if any(d.active() for d in donor.deferrals.all()):
         reasons.append("An active donor deferral applies.")
+    failed = [text for key, text in SCREENING_QUESTIONS if (donor.screening_responses or {}).get(key)]
+    if failed:
+        # Name the question only; the donor's wider medical history is never shown here (TC-F02).
+        reasons.append("Screening questionnaire answered Yes to: " + " ".join(failed))
     return not reasons, reasons
 
 

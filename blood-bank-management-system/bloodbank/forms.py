@@ -2,7 +2,7 @@ import re
 
 from django import forms
 from django.utils import timezone
-from .models import (BLOOD_GROUPS, COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
+from .models import (BLOOD_GROUPS, COMPONENT_CODES, DonationType, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
                      LabResult, Reservation)
 
 
@@ -161,7 +161,11 @@ class CrossMatchForm(forms.Form):
 class DonationForm(forms.Form):
     donor = forms.ModelChoiceField(queryset=Donor.objects.all())
     branch = forms.ModelChoiceField(queryset=Branch.objects.all())
-    blood_group = forms.ChoiceField(choices=[(x, x) for x in ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]])
+    blood_group = forms.ChoiceField(choices=[(x, x) for x in BLOOD_GROUPS])
+    donation_type = forms.ChoiceField(choices=DonationType.choices, initial=DonationType.WHOLE_BLOOD, required=False)
+
+    def clean_donation_type(self):
+        return self.cleaned_data.get("donation_type") or DonationType.WHOLE_BLOOD
 
     def __init__(self, *args, branch=None, **kwargs):
         super().__init__(*args, **kwargs)

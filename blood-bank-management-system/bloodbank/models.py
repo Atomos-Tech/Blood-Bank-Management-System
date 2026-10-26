@@ -90,12 +90,27 @@ class Deferral(models.Model):
     approved_by = models.ForeignKey(User, on_delete=models.PROTECT)
     def active(self): return self.permanent or self.end_date is None or self.end_date >= timezone.localdate()
 
+class DonationType(models.TextChoices):
+    WHOLE_BLOOD = "WHOLE_BLOOD", "Whole blood"
+    PLATELETS = "PLATELETS", "Platelets (apheresis)"
+    PLASMA = "PLASMA", "Plasma (apheresis)"
+
+
 class EligibilityRule(models.Model):
     min_age = models.PositiveIntegerField(default=18)
     max_age = models.PositiveIntegerField(default=65)
     min_weight_kg = models.DecimalField(max_digits=5, decimal_places=1, default=50)
-    minimum_interval_days = models.PositiveIntegerField(default=90)
+    # FR-03: the minimum gap depends on the type of the donor's previous donation.
+    minimum_interval_days = models.PositiveIntegerField(default=90, verbose_name="Whole blood interval (days)")
+    platelets_interval_days = models.PositiveIntegerField(default=14)
+    plasma_interval_days = models.PositiveIntegerField(default=28)
     active = models.BooleanField(default=True)
+
+    def interval_for(self, donation_type):
+        return {
+            DonationType.PLATELETS: self.platelets_interval_days,
+            DonationType.PLASMA: self.plasma_interval_days,
+        }.get(donation_type, self.minimum_interval_days)
 
 class AppointmentSlot(models.Model):
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
@@ -120,6 +135,7 @@ class Donation(models.Model):
     collected_at = models.DateTimeField()
     collector = models.ForeignKey(User, on_delete=models.PROTECT)
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
+    donation_type = models.CharField(max_length=16, choices=DonationType.choices, default=DonationType.WHOLE_BLOOD)
 
 # Components prepared from one whole-blood donation and the suffix used in their unit IDs (FR-09).
 COMPONENT_CODES = {"Packed Red Cells": "RBC", "Platelets": "PLT", "Plasma": "PLS"}
