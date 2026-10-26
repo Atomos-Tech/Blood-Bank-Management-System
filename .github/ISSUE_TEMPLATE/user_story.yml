@@ -1,0 +1,36 @@
+name: User Story
+description: Backlog user story linked to an SRS functional, non-functional, or security requirement
+title: "BB-XX [FR-XX] "
+labels: ["user-story"]
+body:
+  - type: input
+    id: srs_id
+    attributes:
+      label: SRS Requirement ID
+      placeholder: "e.g., FR-17, NFR-01, SEC-05"
+    validations:
+      required: true
+  - type: input
+    id: points
+    attributes:
+      label: Story Points
+      placeholder: "e.g., 1, 2, 3, 5"
+    validations:
+      required: true
+  - type: textarea
+    id: story
+    attributes:
+      label: User Story
+      placeholder: "As a <role>, I want <capability> so that <benefit>."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+        - [ ] Automated test covers TC-XX
+    validations:
+      required: true

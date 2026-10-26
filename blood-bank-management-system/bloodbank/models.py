@@ -133,6 +133,7 @@ class BloodRequest(models.Model):
     priority = models.CharField(max_length=16)
     required_by = models.DateTimeField()
     clinical_reference = models.CharField(max_length=120)
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True, unique=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta:

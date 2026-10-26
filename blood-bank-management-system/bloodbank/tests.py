@@ -818,3 +818,129 @@ class PerformanceAndConcurrencyEvidenceTests(TestCase):
         self.assertEqual(nfr02["duplicate_unit_assignments"], 0)
         self.assertLessEqual(nfr02["max_ms"], 5000.0)
         self.assertTrue(nfr02["sla_passed"])
+
+
+class SADSInventoryAndRequestAPITests(TestCase):
+    """SADS Section 8.1, 8.2, 8.3 & UC-04/UC-05: REST API endpoints, idempotency, and standard error bodies."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="API Branch", code="APIB")
+        self.staff = User.objects.create_user("apistaff@bbms.test", email="apistaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.hosp = User.objects.create_user("apihosp@bbms.test", email="apihosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hosp, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="API City Hospital"
+        )
+        self.donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="API Donor",
+            email="apidonor@example.test",
+            phone="9000000099",
+            date_of_birth=timezone.localdate() - timedelta(days=25 * 365),
+            weight_kg=62,
+            blood_group="O+",
+            consent_given=True,
+        )
+        don = Donation.objects.create(
+            donation_id="DON-API-1", donor=self.donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+        self.unit = BloodUnit.objects.create(
+            unit_id="UNIT-API-1",
+            donation=don,
+            blood_group="O+",
+            component="Packed Red Cells",
+            volume_ml=350,
+            expiry_at=timezone.now() + timedelta(days=14),
+            branch=self.branch,
+            status=BloodUnit.Status.AVAILABLE,
+        )
+
+    def test_sads_api_workflow_idempotency_and_standard_errors(self):
+        # 1. POST /api/v1/requests with Idempotency-Key (UC-04)
+        self.client.force_login(self.hosp)
+        payload = {
+            "branch": self.branch.pk,
+            "blood_group": "O+",
+            "component": "Packed Red Cells",
+            "quantity": 1,
+            "priority": "Urgent",
+            "required_by": (timezone.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "clinical_reference": "API-REF-01",
+        }
+        r1 = self.client.post(
+            "/api/v1/requests",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="idem-req-001",
+        )
+        self.assertEqual(r1.status_code, 201)
+        req_id = r1.json()["id"]
+
+        # Duplicate submission with same Idempotency-Key returns existing request without creating duplicate
+        r2 = self.client.post(
+            "/api/v1/requests",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="idem-req-001",
+        )
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.json()["id"], req_id)
+        self.assertEqual(BloodRequest.objects.filter(clinical_reference="API-REF-01").count(), 1)
+
+        # Standard error body check on invalid input (SADS 8.3)
+        bad_inv = self.client.get("/api/v1/inventory?expires_before=not-a-date")
+        self.assertEqual(bad_inv.status_code, 400)
+        err_body = bad_inv.json()
+        for key in ("code", "message", "field_errors", "correlation_id", "timestamp"):
+            self.assertIn(key, err_body)
+
+        # 2. PATCH /api/v1/requests/{id}/status as Staff -> APPROVED
+        self.client.force_login(self.staff)
+        st_resp = self.client.patch(
+            f"/api/v1/requests/{req_id}/status",
+            data=json.dumps({"status": "APPROVED"}),
+            content_type="application/json",
+        )
+        self.assertEqual(st_resp.status_code, 200)
+        self.assertEqual(st_resp.json()["status"], "APPROVED")
+
+        # 3. POST /api/v1/requests/{id}/reserve with Idempotency-Key
+        res_resp = self.client.post(
+            f"/api/v1/requests/{req_id}/reserve",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="idem-res-001",
+        )
+        self.assertEqual(res_resp.status_code, 200)
+        res_id = res_resp.json()["reservations"][0]["id"]
+
+        # Idempotent retry of reservation returns 200 with same payload
+        res_retry = self.client.post(
+            f"/api/v1/requests/{req_id}/reserve",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="idem-res-001",
+        )
+        self.assertEqual(res_retry.status_code, 200)
+        self.assertEqual(res_retry.json()["reservations"][0]["id"], res_id)
+
+        # 4. POST /api/v1/issues before cross-match -> 409 conflict with standard error body
+        issue_blocked = self.client.post(
+            "/api/v1/issues",
+            data=json.dumps({"reservation_id": res_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(issue_blocked.status_code, 409)
+        self.assertEqual(issue_blocked.json()["code"], "issue_conflict")
+
+        # Record compatible cross-match and issue via POST /api/v1/issues
+        CrossMatch.objects.create(reservation_id=res_id, outcome="COMPATIBLE", recorded_by=self.staff)
+        issue_ok = self.client.post(
+            "/api/v1/issues",
+            data=json.dumps({"reservation_id": res_id}),
+            content_type="application/json",
+            HTTP_IDEMPOTENCY_KEY="idem-issue-001",
+        )
+        self.assertEqual(issue_ok.status_code, 201)
+        self.assertEqual(issue_ok.json()["unit_status"], "ISSUED")
+        self.assertEqual(issue_ok.json()["request_status"], "FULFILLED")

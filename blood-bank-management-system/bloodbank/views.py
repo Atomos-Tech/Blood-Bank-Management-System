@@ -1,8 +1,11 @@
 from datetime import timedelta
+import json
+import uuid
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
+from django.core.paginator import Paginator
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import HttpResponseForbidden, JsonResponse
@@ -65,6 +68,36 @@ def deny(user, summary=""):
             summary=summary,
         )
     return HttpResponseForbidden("This account is not permitted to perform that action.")
+
+
+def api_error(code, message, status=400, field_errors=None):
+    payload = {
+        "code": code,
+        "message": message,
+        "correlation_id": str(uuid.uuid4()),
+        "timestamp": timezone.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if field_errors is not None:
+        payload["field_errors"] = field_errors
+    return JsonResponse(payload, status=status)
+
+
+def _parse_payload(request):
+    if request.content_type and "application/json" in request.content_type:
+        try:
+            return json.loads(request.body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return None
+    return request.POST.dict()
+
+
+def _get_idempotency_key(request, data=None):
+    header_key = request.headers.get("Idempotency-Key") or request.META.get("HTTP_IDEMPOTENCY_KEY")
+    if header_key:
+        return header_key.strip()[:64]
+    if isinstance(data, dict) and data.get("idempotency_key"):
+        return str(data["idempotency_key"]).strip()[:64]
+    return None
 
 
 def _filter_units_by_search(qs, params):
@@ -339,7 +372,6 @@ def inventory(request):
     if role(request.user) == UserProfile.Role.HOSPITAL:
         units = units.filter(status=BloodUnit.Status.AVAILABLE, expiry_at__gt=timezone.now())
 
-    from django.core.paginator import Paginator
     paginator = Paginator(units.order_by("expiry_at", "id"), 50)
     page_obj = paginator.get_page(p.get("page", 1))
     branches = Branch.objects.filter(pk=ub.pk) if ub else Branch.objects.all()
@@ -451,19 +483,27 @@ def request_list(request):
     if role(request.user) == UserProfile.Role.HOSPITAL:
         qs = qs.filter(created_by=request.user)
 
-    if request.method == "POST" and form.is_valid():
-        r = form.save(commit=False)
-        if not in_branch_scope(request.user, r.branch_id):
-            return deny(request.user, "Cross-branch blood request creation denied")
-        r.created_by = request.user
-        r.hospital = request.user.profile.hospital_name
-        if not r.hospital:
-            form.add_error(None, "Hospital staff account is missing its verified hospital assignment.")
-        else:
-            r.save()
-            audit(request.user, "BLOOD_REQUEST_CREATED", r, branch=r.branch)
-            messages.success(request, "Blood request submitted.")
-            return redirect("requests")
+    if request.method == "POST":
+        idem_key = _get_idempotency_key(request, request.POST)
+        if idem_key:
+            existing = BloodRequest.objects.filter(idempotency_key=idem_key, created_by=request.user).first()
+            if existing:
+                messages.success(request, "Blood request submitted.")
+                return redirect("requests")
+        if form.is_valid():
+            r = form.save(commit=False)
+            if not in_branch_scope(request.user, r.branch_id):
+                return deny(request.user, "Cross-branch blood request creation denied")
+            r.created_by = request.user
+            r.hospital = request.user.profile.hospital_name
+            r.idempotency_key = idem_key
+            if not r.hospital:
+                form.add_error(None, "Hospital staff account is missing its verified hospital assignment.")
+            else:
+                r.save()
+                audit(request.user, "BLOOD_REQUEST_CREATED", r, branch=r.branch)
+                messages.success(request, "Blood request submitted.")
+                return redirect("requests")
     return render(request, "bloodbank/requests.html", {"requests": qs.order_by("-created_at"), "form": form})
 
 
@@ -635,16 +675,26 @@ def reports(request):
 
 
 @login_required
+@require_http_methods(["GET"])
 def api_inventory(request):
     if not allowed(request.user, {UserProfile.Role.STAFF, UserProfile.Role.ADMIN, UserProfile.Role.HOSPITAL}):
         deny(request.user)
-        return JsonResponse({"code": "forbidden", "message": "Not authorized"}, status=403)
+        return api_error("forbidden", "Not authorized", status=403)
     expire_units()
     ub = user_branch(request.user)
     p = request.GET
     if p.get("branch") and not in_branch_scope(request.user, p["branch"]):
         deny(request.user, "Cross-branch API inventory access denied")
-        return JsonResponse({"code": "forbidden", "message": "Cross-branch access denied"}, status=403)
+        return api_error("forbidden", "Cross-branch access denied", status=403)
+
+    exp = (p.get("expires_before") or p.get("expiry_date") or "").strip()
+    if exp and parse_datetime(exp) is None and parse_date(exp) is None:
+        return api_error(
+            "validation_error",
+            "Invalid expires_before date format. Use ISO 8601 (YYYY-MM-DD).",
+            status=400,
+            field_errors={"expires_before": ["Enter a valid ISO date or datetime."]},
+        )
 
     qs = BloodUnit.objects.filter(status=BloodUnit.Status.AVAILABLE, expiry_at__gt=timezone.now())
     if ub:
@@ -660,3 +710,209 @@ def api_inventory(request):
         qs.order_by("expiry_at", "id")[:100].values("unit_id", "blood_group", "component", "expiry_at", "branch__code")
     )
     return JsonResponse({"items": items})
+
+
+@login_required
+@require_http_methods(["POST"])
+def api_create_request(request):
+    """POST /api/v1/requests — Hospital Staff create a blood request (SADS 8.2, FR-19, UC-04)."""
+    if role(request.user) != UserProfile.Role.HOSPITAL and not request.user.is_superuser:
+        deny(request.user, "Non-hospital user attempted POST /api/v1/requests")
+        return api_error("forbidden", "Only hospital staff can submit blood requests.", status=403)
+    data = _parse_payload(request)
+    if data is None:
+        return api_error("invalid_json", "Request body must be valid JSON.", status=400)
+
+    idem_key = _get_idempotency_key(request, data)
+    if idem_key:
+        existing = BloodRequest.objects.filter(idempotency_key=idem_key, created_by=request.user).first()
+        if existing:
+            return JsonResponse(
+                {
+                    "id": existing.pk,
+                    "hospital": existing.hospital,
+                    "branch": existing.branch.code,
+                    "blood_group": existing.blood_group,
+                    "component": existing.component,
+                    "quantity": existing.quantity,
+                    "priority": existing.priority,
+                    "required_by": existing.required_by.isoformat(),
+                    "clinical_reference": existing.clinical_reference,
+                    "status": existing.status,
+                },
+                status=200,
+            )
+
+    ub = user_branch(request.user)
+    if "branch" not in data and ub is not None:
+        data = dict(data, branch=ub.pk)
+    form = BloodRequestForm(data, branch=ub)
+    if not form.is_valid():
+        return api_error("validation_error", "Invalid blood request fields.", status=400, field_errors=form.errors)
+
+    r = form.save(commit=False)
+    if not in_branch_scope(request.user, r.branch_id):
+        deny(request.user, "Cross-branch API request creation denied")
+        return api_error("forbidden", "Cross-branch access denied.", status=403)
+    r.created_by = request.user
+    r.hospital = getattr(getattr(request.user, "profile", None), "hospital_name", "")
+    if not r.hospital:
+        return api_error(
+            "validation_error",
+            "Hospital staff account is missing its verified hospital assignment.",
+            status=400,
+            field_errors={"hospital": ["Verified hospital assignment required."]},
+        )
+    r.idempotency_key = idem_key
+    r.save()
+    audit(request.user, "BLOOD_REQUEST_CREATED", r, branch=r.branch)
+    return JsonResponse(
+        {
+            "id": r.pk,
+            "hospital": r.hospital,
+            "branch": r.branch.code,
+            "blood_group": r.blood_group,
+            "component": r.component,
+            "quantity": r.quantity,
+            "priority": r.priority,
+            "required_by": r.required_by.isoformat(),
+            "clinical_reference": r.clinical_reference,
+            "status": r.status,
+        },
+        status=201,
+    )
+
+
+@login_required
+@require_http_methods(["PATCH", "POST"])
+def api_request_status(request, pk):
+    """PATCH /api/v1/requests/{id}/status — Approve, reject or cancel a request (SADS 8.2, FR-20, FR-21)."""
+    r = get_object_or_404(BloodRequest.objects.select_related("branch", "created_by"), pk=pk)
+    if not in_branch_scope(request.user, r.branch_id):
+        deny(request.user, "Cross-branch API request status update denied")
+        return api_error("forbidden", "Cross-branch access denied.", status=403)
+
+    data = _parse_payload(request)
+    if data is None:
+        return api_error("invalid_json", "Request body must be valid JSON.", status=400)
+
+    raw_status = (data.get("status") or data.get("action") or "").strip().upper()
+    action_map = {
+        "APPROVE": BloodRequest.Status.APPROVED,
+        "APPROVED": BloodRequest.Status.APPROVED,
+        "REJECT": BloodRequest.Status.REJECTED,
+        "REJECTED": BloodRequest.Status.REJECTED,
+        "CANCEL": BloodRequest.Status.CANCELLED,
+        "CANCELLED": BloodRequest.Status.CANCELLED,
+    }
+    target = action_map.get(raw_status)
+    if not target:
+        return api_error(
+            "validation_error",
+            "Status must be one of APPROVED, REJECTED, or CANCELLED.",
+            status=400,
+            field_errors={"status": ["Unsupported status value."]},
+        )
+
+    if target == BloodRequest.Status.CANCELLED:
+        if role(request.user) == UserProfile.Role.HOSPITAL:
+            if r.created_by_id != request.user.id or r.status != BloodRequest.Status.PENDING:
+                deny(request.user, "Hospital staff attempted unauthorized API request cancellation")
+                return api_error("forbidden", "Hospital staff can cancel only their own Pending requests.", status=403)
+        elif not allowed(request.user, STAFF):
+            deny(request.user)
+            return api_error("forbidden", "Not authorized.", status=403)
+    else:
+        if not allowed(request.user, STAFF):
+            deny(request.user)
+            return api_error("forbidden", "Only blood bank staff can approve or reject requests.", status=403)
+
+    try:
+        transition_request(r, target, request.user)
+    except ValueError as e:
+        return api_error("state_conflict", str(e), status=409)
+
+    return JsonResponse({"id": r.pk, "status": r.status}, status=200)
+
+
+@login_required
+@require_http_methods(["POST"])
+def api_reserve_units(request, pk):
+    """POST /api/v1/requests/{id}/reserve — Reserve compatible units atomically (SADS 8.2, FR-22)."""
+    if not allowed(request.user, STAFF):
+        deny(request.user)
+        return api_error("forbidden", "Only blood bank staff can reserve units.", status=403)
+    r = get_object_or_404(BloodRequest.objects.select_related("branch"), pk=pk)
+    if not in_branch_scope(request.user, r.branch_id):
+        deny(request.user, "Cross-branch API reservation denied")
+        return api_error("forbidden", "Cross-branch access denied.", status=403)
+
+    data = _parse_payload(request) or {}
+    idem_key = _get_idempotency_key(request, data)
+    cache_key = f"idem:reserve:{r.pk}:{idem_key}" if idem_key else None
+    if cache_key and cache.get(cache_key):
+        return JsonResponse(cache.get(cache_key), status=200)
+
+    try:
+        made = reserve_units(r, request.user)
+    except ValueError as e:
+        return api_error("reservation_conflict", str(e), status=409)
+
+    payload = {
+        "request_id": r.pk,
+        "reserved_count": len(made),
+        "reservations": [{"id": res.pk, "unit_id": res.unit.unit_id} for res in made],
+    }
+    if cache_key:
+        cache.set(cache_key, payload, 3600)
+    return JsonResponse(payload, status=200)
+
+
+@login_required
+@require_http_methods(["POST"])
+def api_issue_unit(request):
+    """POST /api/v1/issues — Issue cross-matched units atomically (SADS 8.2, FR-23, FR-24)."""
+    if not allowed(request.user, STAFF):
+        deny(request.user)
+        return api_error("forbidden", "Only blood bank staff can issue units.", status=403)
+    data = _parse_payload(request)
+    if data is None:
+        return api_error("invalid_json", "Request body must be valid JSON.", status=400)
+
+    res_id = data.get("reservation_id")
+    if not res_id:
+        return api_error(
+            "validation_error",
+            "reservation_id is required.",
+            status=400,
+            field_errors={"reservation_id": ["This field is required."]},
+        )
+
+    reservation = get_object_or_404(Reservation.objects.select_related("unit", "request__branch"), pk=res_id)
+    if not in_branch_scope(request.user, reservation.request.branch_id):
+        deny(request.user, "Cross-branch API issue denied")
+        return api_error("forbidden", "Cross-branch access denied.", status=403)
+
+    idem_key = _get_idempotency_key(request, data)
+    cache_key = f"idem:issue:{reservation.pk}:{idem_key}" if idem_key else None
+    if cache_key and cache.get(cache_key):
+        return JsonResponse(cache.get(cache_key), status=200)
+
+    try:
+        issue_reservation(reservation, request.user)
+    except ValueError as e:
+        return api_error("issue_conflict", str(e), status=409)
+
+    reservation.refresh_from_db()
+    reservation.unit.refresh_from_db()
+    reservation.request.refresh_from_db()
+    payload = {
+        "reservation_id": reservation.pk,
+        "unit_id": reservation.unit.unit_id,
+        "unit_status": reservation.unit.status,
+        "request_id": reservation.request.pk,
+        "request_status": reservation.request.status,
+    }
+    if cache_key:
+        cache.set(cache_key, payload, 3600)
+    return JsonResponse(payload, status=201)

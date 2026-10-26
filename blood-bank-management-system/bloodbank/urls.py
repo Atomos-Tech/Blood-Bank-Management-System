@@ -21,5 +21,15 @@ urlpatterns = [
     path("reservations/<int:pk>/issue/", views.issue_view, name="issue"),
     path("audit/", views.audit_view, name="audit"),
     path("reports/", views.reports, name="reports"),
+    # SADS Section 8.2 REST API endpoints for Inventory & Request Service (FR-17 to FR-24)
+    path("api/v1/inventory", views.api_inventory, name="api_inventory_noslash"),
     path("api/v1/inventory/", views.api_inventory, name="api_inventory"),
+    path("api/v1/requests", views.api_create_request, name="api_requests_noslash"),
+    path("api/v1/requests/", views.api_create_request, name="api_requests"),
+    path("api/v1/requests/<int:pk>/status", views.api_request_status, name="api_request_status_noslash"),
+    path("api/v1/requests/<int:pk>/status/", views.api_request_status, name="api_request_status"),
+    path("api/v1/requests/<int:pk>/reserve", views.api_reserve_units, name="api_reserve_units_noslash"),
+    path("api/v1/requests/<int:pk>/reserve/", views.api_reserve_units, name="api_reserve_units"),
+    path("api/v1/issues", views.api_issue_unit, name="api_issues_noslash"),
+    path("api/v1/issues/", views.api_issue_unit, name="api_issues"),
 ]

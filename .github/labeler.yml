@@ -1,0 +1,32 @@
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "**/*.md"
+          - "**/*.pdf"
+          - "phase1/**"
+
+inventory:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/templates/bloodbank/inventory.html"
+          - "blood-bank-management-system/bloodbank/management/commands/check_alerts.py"
+
+requests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/templates/bloodbank/requests.html"
+          - "blood-bank-management-system/bloodbank/services.py"
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/nginx.conf"
+          - "blood-bank-management-system/docker-compose.yml"
+          - "blood-bank-management-system/bbms/settings.py"
+
+performance:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/locustfile.py"
+          - "blood-bank-management-system/scripts/**"
