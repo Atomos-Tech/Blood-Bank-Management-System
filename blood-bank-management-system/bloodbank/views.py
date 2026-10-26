@@ -240,7 +240,10 @@ def donor_list(request):
         if ub and donor.branch_id is None:
             donor.branch = ub
         donor.save()
-        audit(request.user, "DONOR_REGISTERED", donor, summary="Consent captured", branch=donor.branch)
+        audit(
+            request.user, "DONOR_REGISTERED", donor,
+            summary="Consent captured; screening questionnaire completed", branch=donor.branch,
+        )
         messages.success(request, "Donor registered.")
         return redirect("donors")
     donors_qs = Donor.objects.order_by("-created_at")

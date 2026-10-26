@@ -51,6 +51,19 @@ class AuditEvent(models.Model):
         super().save(*args, **kwargs)
     def delete(self, *args, **kwargs): raise ImmutableAuditRecord("Audit events cannot be deleted.")
 
+BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
+
+# FR-01 / FR-03: pre-donation screening questionnaire. Each question is answered Yes or No at
+# registration; a "Yes" to any of them makes the donor ineligible until staff review the record.
+SCREENING_QUESTIONS = [
+    ("recent_illness", "Fever, cold or any infection in the last 14 days?"),
+    ("recent_tattoo", "Tattoo, piercing or acupuncture in the last 6 months?"),
+    ("recent_surgery", "Major surgery or a blood transfusion in the last 12 months?"),
+    ("pregnant", "Currently pregnant or breastfeeding?"),
+    ("antibiotics", "Currently taking antibiotics?"),
+]
+
+
 class Donor(models.Model):
     user = models.OneToOneField(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="donor_profile")
     branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.PROTECT, related_name="donors")
@@ -59,8 +72,10 @@ class Donor(models.Model):
     phone = models.CharField(max_length=20)
     date_of_birth = models.DateField()
     weight_kg = models.DecimalField(max_digits=5, decimal_places=1)
-    blood_group = models.CharField(max_length=3)
+    blood_group = models.CharField(max_length=3, choices=[(g, g) for g in BLOOD_GROUPS])
     medical_history = models.TextField(blank=True)
+    # FR-01: answers to SCREENING_QUESTIONS, stored as {"question_key": True/False}.
+    screening_responses = models.JSONField(default=dict, blank=True)
     consent_given = models.BooleanField(default=False)
     eligibility_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

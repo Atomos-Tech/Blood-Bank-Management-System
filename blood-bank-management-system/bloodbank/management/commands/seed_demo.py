@@ -2,7 +2,7 @@ from datetime import timedelta
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from bloodbank.models import AppointmentSlot, Branch, Donor, EligibilityRule, ShelfLifeRule, TestType, UserProfile
+from bloodbank.models import SCREENING_QUESTIONS, AppointmentSlot, Branch, Donor, EligibilityRule, ShelfLifeRule, TestType, UserProfile
 
 
 class Command(BaseCommand):
@@ -60,6 +60,8 @@ class Command(BaseCommand):
                         "weight_kg": 60,
                         "blood_group": "O+",
                         "consent_given": True,
+                        "medical_history": "None declared",
+                        "screening_responses": {key: False for key, _ in SCREENING_QUESTIONS},
                     },
                 )
         AppointmentSlot.objects.get_or_create(

@@ -1,10 +1,32 @@
+import re
+
 from django import forms
 from django.utils import timezone
-from .models import (COMPONENT_CODES, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
+from .models import (BLOOD_GROUPS, COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
                      LabResult, Reservation)
 
 
+PHONE_PATTERN = re.compile(r"^\+?\d{10,15}$")
+YES_NO = [("no", "No"), ("yes", "Yes")]
+
+
 class DonorForm(forms.ModelForm):
+    """FR-01: identity, contact, consent and medical-history fields are all validated before saving."""
+
+    phone = forms.CharField(max_length=30, help_text="10 to 15 digits; spaces, dashes and a leading + are allowed.")
+    blood_group = forms.ChoiceField(choices=[("", "Select blood group")] + [(g, g) for g in BLOOD_GROUPS])
+    medical_history = forms.CharField(
+        widget=forms.Textarea(attrs={"rows": 2}),
+        label="Medical history",
+        error_messages={"required": "Medical history is required. Write \"None\" if there is nothing to declare."},
+        help_text="Past illnesses, conditions or medication. Write \"None\" if there is nothing to declare.",
+    )
+    consent_given = forms.BooleanField(
+        required=True,
+        label="Donor consents to donation and to the storage of this data",
+        error_messages={"required": "Donor consent is required to register."},
+    )
+
     class Meta:
         model = Donor
         fields = [
@@ -17,6 +39,58 @@ class DonorForm(forms.ModelForm):
             "medical_history",
             "consent_given",
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for key, question in SCREENING_QUESTIONS:
+            self.fields[f"screening_{key}"] = forms.ChoiceField(
+                choices=YES_NO, widget=forms.RadioSelect, label=question,
+                error_messages={"required": "Answer every screening question."},
+            )
+            if self.instance.pk and key in self.instance.screening_responses:
+                self.initial[f"screening_{key}"] = "yes" if self.instance.screening_responses[key] else "no"
+        self.fields["date_of_birth"].widget = forms.DateInput(attrs={"type": "date"})
+
+    def clean_full_name(self):
+        name = (self.cleaned_data.get("full_name") or "").strip()
+        if len(name) < 2:
+            raise forms.ValidationError("Enter the donor's full name.")
+        return name
+
+    def clean_phone(self):
+        phone = re.sub(r"[\s-]", "", self.cleaned_data.get("phone") or "")
+        if not PHONE_PATTERN.match(phone):
+            raise forms.ValidationError("Enter a valid phone number of 10 to 15 digits.")
+        return phone
+
+    def clean_date_of_birth(self):
+        dob = self.cleaned_data.get("date_of_birth")
+        if dob and dob > timezone.localdate():
+            raise forms.ValidationError("Date of birth cannot be in the future.")
+        return dob
+
+    def clean_weight_kg(self):
+        weight = self.cleaned_data.get("weight_kg")
+        if weight is not None and not 0 < weight < 300:
+            raise forms.ValidationError("Enter a weight between 1 and 299 kg.")
+        return weight
+
+    def clean_medical_history(self):
+        history = (self.cleaned_data.get("medical_history") or "").strip()
+        if not history:
+            raise forms.ValidationError("Medical history is required. Write \"None\" if there is nothing to declare.")
+        return history
+
+    def clean(self):
+        cleaned = super().clean()
+        answers = {}
+        for key, _ in SCREENING_QUESTIONS:
+            answer = cleaned.get(f"screening_{key}")
+            if answer:
+                answers[key] = answer == "yes"
+        if len(answers) == len(SCREENING_QUESTIONS):
+            self.instance.screening_responses = answers
+        return cleaned
 
     def clean_email(self):
         # FR-02: one donor profile per email address, compared case-insensitively.

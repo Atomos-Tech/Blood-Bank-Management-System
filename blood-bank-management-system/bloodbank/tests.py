@@ -13,6 +13,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from .models import (
+    SCREENING_QUESTIONS,
     Appointment,
     AppointmentSlot,
     AuditEvent,
@@ -2232,6 +2233,7 @@ class DuplicateDonorEmailTests(TestCase):
             "blood_group": "O+",
             "medical_history": "None",
             "consent_given": "on",
+            **{f"screening_{key}": "no" for key, _ in SCREENING_QUESTIONS},
         }
 
     def test_tc_f01_second_registration_with_same_email_is_rejected(self):
@@ -2247,3 +2249,72 @@ class DuplicateDonorEmailTests(TestCase):
         self.assertContains(response, "already registered with this email")
         self.assertEqual(Donor.objects.count(), 1)
         self.assertEqual(Donor.objects.get().email, "donor1@example.test")
+
+
+class DonorRegistrationValidationTests(TestCase):
+    """BB-08 [FR-01] / TC-F01: a donor is registered only after every mandatory field is valid."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Reg Branch", code="REG")
+        self.staff = User.objects.create_user("regstaff@bbms.test", email="regstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.client.force_login(self.staff)
+
+    def payload(self, **overrides):
+        data = {
+            "full_name": "Asha Rao",
+            "email": "asha@example.test",
+            "phone": "+91 98450 12345",
+            "date_of_birth": "1998-01-20",
+            "weight_kg": "58",
+            "blood_group": "B+",
+            "medical_history": "None",
+            "consent_given": "on",
+            **{f"screening_{key}": "no" for key, _ in SCREENING_QUESTIONS},
+        }
+        data.update(overrides)
+        return {k: v for k, v in data.items() if v is not None}
+
+    def assert_rejected(self, data, message):
+        response = self.client.post("/donors/", data)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, message)
+        self.assertEqual(Donor.objects.count(), 0)
+
+    def test_tc_f01_valid_registration_is_saved_and_audited(self):
+        response = self.client.post("/donors/", self.payload())
+        self.assertRedirects(response, "/donors/")
+        donor = Donor.objects.get()
+        self.assertEqual(donor.phone, "+919845012345")
+        self.assertEqual(donor.branch, self.branch)
+        self.assertTrue(donor.consent_given)
+        self.assertEqual(donor.screening_responses, {key: False for key, _ in SCREENING_QUESTIONS})
+        event = AuditEvent.objects.get(event_type="DONOR_REGISTERED")
+        self.assertEqual(event.record_id, str(donor.pk))
+        self.assertEqual(event.actor, self.staff)
+
+    def test_missing_mandatory_fields_return_field_errors(self):
+        for field in ["full_name", "email", "phone", "date_of_birth", "weight_kg", "blood_group"]:
+            with self.subTest(field=field):
+                response = self.client.post("/donors/", self.payload(**{field: None}))
+                self.assertIn(field, response.context["form"].errors)
+        self.assertEqual(Donor.objects.count(), 0)
+
+    def test_consent_is_mandatory(self):
+        self.assert_rejected(self.payload(consent_given=None), "Donor consent is required to register.")
+
+    def test_medical_history_and_questionnaire_are_mandatory(self):
+        self.assert_rejected(self.payload(medical_history="   "), "Medical history is required.")
+        self.assert_rejected(self.payload(screening_recent_illness=None), "Answer every screening question.")
+
+    def test_future_date_of_birth_is_rejected(self):
+        future = (timezone.localdate() + timedelta(days=1)).isoformat()
+        self.assert_rejected(self.payload(date_of_birth=future), "Date of birth cannot be in the future.")
+
+    def test_invalid_blood_group_is_rejected(self):
+        self.assert_rejected(self.payload(blood_group="C+"), "Select a valid choice")
+
+    def test_invalid_phone_is_rejected(self):
+        for phone in ["12345", "98450abcde", "+91 98450 12345 67890"]:
+            with self.subTest(phone=phone):
+                self.assert_rejected(self.payload(phone=phone), "Enter a valid phone number")
