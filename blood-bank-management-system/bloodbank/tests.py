@@ -35,6 +35,7 @@ from .models import (
 from .services import (
     calculate_expiry,
     check_stock_and_expiry_alerts,
+    record_donation,
     eligibility,
     issue_reservation,
     release_reservation,
@@ -969,8 +970,7 @@ class DonationCollectionDetailsTests(TestCase):
             "donor": self.donor.pk,
             "branch": self.branch.pk,
             "blood_group": "A+",
-            "component": "Packed Red Cells",
-            "volume_ml": 350,
+            "volume_rbc": 350,
         }
 
     def test_tc_f06_all_collection_fields_stored_and_collector_is_logged_in_staff(self):
@@ -990,11 +990,12 @@ class DonationCollectionDetailsTests(TestCase):
 
     def test_tc_f06_each_mandatory_field_is_required(self):
         self.client.force_login(self.staff)
-        for field in ["donor", "branch", "blood_group", "component", "volume_ml"]:
+        for field in ["donor", "branch", "blood_group", "volume_rbc"]:
             data = {k: v for k, v in self.valid_post.items() if k != field}
             resp = self.client.post("/donations/new/", data)
             self.assertEqual(resp.status_code, 200, field)
-            self.assertIn(field, resp.context["form"].errors)
+            # Component and volume are captured together: with no component volume the form rejects as a whole.
+            self.assertIn("__all__" if field == "volume_rbc" else field, resp.context["form"].errors)
         self.assertEqual(Donation.objects.count(), 0)
         self.assertEqual(BloodUnit.objects.count(), 0)
 
@@ -1034,7 +1035,7 @@ class ShelfLifeExpiryTests(TestCase):
         self.client.force_login(self.staff)
         self.client.post(
             "/donations/new/",
-            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "B+", "component": "Platelets", "volume_ml": 250},
+            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "B+", "volume_plt": 250},
         )
         unit = BloodUnit.objects.select_related("donation").get()
         self.assertEqual(unit.expiry_at, unit.donation.collected_at + timedelta(days=5))
@@ -1051,8 +1052,89 @@ class ShelfLifeExpiryTests(TestCase):
         self.client.force_login(self.staff)
         resp = self.client.post(
             "/donations/new/",
-            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "B+", "component": "Plasma", "volume_ml": 250},
+            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "B+", "volume_pls": 250},
         )
-        self.assertContains(resp, "No approved shelf-life rule exists for this component.")
+        self.assertContains(resp, "No approved shelf-life rule exists for this component (Plasma).")
         self.assertEqual(Donation.objects.count(), 0)
         self.assertEqual(BloodUnit.objects.count(), 0)
+
+
+class UniqueDonationAndUnitIdentifierTests(TestCase):
+    """BB-16 [FR-09] & TC-F06: Unique donation and blood unit identifiers with derived components."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="ID Branch", code="IDB")
+        for component, days in [("Packed Red Cells", 35), ("Platelets", 5), ("Plasma", 365)]:
+            ShelfLifeRule.objects.create(component=component, days=days)
+        self.staff = User.objects.create_user("idstaff@bbms.test", email="idstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="ID Donor",
+            email="iddonor@example.test",
+            phone="9000000103",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="O-",
+            consent_given=True,
+        )
+        self.components = {"Packed Red Cells": 280, "Platelets": 50, "Plasma": 220}
+
+    def test_tc_f06_one_donation_produces_several_traceable_component_units(self):
+        donation, units = record_donation(self.donor, self.branch, self.staff, "O-", self.components)
+        self.assertEqual(len(units), 3)
+        self.assertEqual({u.component for u in units}, set(self.components))
+        self.assertEqual(len({u.unit_id for u in units}), 3)
+        for unit in BloodUnit.objects.select_related("donation__donor"):
+            self.assertTrue(unit.unit_id.startswith(donation.donation_id))
+            self.assertEqual(unit.donation, donation)
+            self.assertEqual(unit.donation.donor, self.donor)
+            self.assertEqual(unit.volume_ml, self.components[unit.component])
+
+    def test_tc_f06_ids_are_unique_for_donations_in_the_same_instant(self):
+        stamp = timezone.now()
+        ids = set()
+        for _ in range(20):
+            donation, units = record_donation(self.donor, self.branch, self.staff, "O-", {"Plasma": 220}, collected_at=stamp)
+            ids.add(donation.donation_id)
+            ids.add(units[0].unit_id)
+        self.assertEqual(len(ids), 40)
+
+    def test_tc_f06_duplicate_unit_id_storage_fails(self):
+        donation, units = record_donation(self.donor, self.branch, self.staff, "O-", {"Plasma": 220})
+        from django.db import transaction
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            BloodUnit.objects.create(
+                unit_id=units[0].unit_id,
+                donation=donation,
+                blood_group="O-",
+                component="Plasma",
+                volume_ml=220,
+                expiry_at=units[0].expiry_at,
+                branch=self.branch,
+            )
+
+    def test_tc_f06_id_collision_is_retried(self):
+        record_donation(self.donor, self.branch, self.staff, "O-", {"Plasma": 220})
+        taken = Donation.objects.get().donation_id
+        with patch("bloodbank.services.new_donation_id", side_effect=[taken, "DON-RETRY-OK"]):
+            donation, units = record_donation(self.donor, self.branch, self.staff, "O-", {"Plasma": 220})
+        self.assertEqual(donation.donation_id, "DON-RETRY-OK")
+        self.assertEqual(Donation.objects.count(), 2)
+
+    def test_tc_f06_missing_rule_for_any_component_stores_nothing(self):
+        ShelfLifeRule.objects.filter(component="Platelets").delete()
+        with self.assertRaises(ValueError):
+            record_donation(self.donor, self.branch, self.staff, "O-", self.components)
+        self.assertEqual(Donation.objects.count(), 0)
+        self.assertEqual(BloodUnit.objects.count(), 0)
+
+    def test_tc_f06_form_records_every_component_with_a_volume(self):
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            "/donations/new/",
+            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "O-", "volume_rbc": 280, "volume_pls": 220},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(Donation.objects.count(), 1)
+        self.assertEqual(set(BloodUnit.objects.values_list("component", flat=True)), {"Packed Red Cells", "Plasma"})

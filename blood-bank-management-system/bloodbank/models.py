@@ -89,6 +89,9 @@ class Donation(models.Model):
     collector = models.ForeignKey(User, on_delete=models.PROTECT)
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
 
+# Components prepared from one whole-blood donation and the suffix used in their unit IDs (FR-09).
+COMPONENT_CODES = {"Packed Red Cells": "RBC", "Platelets": "PLT", "Plasma": "PLS"}
+
 class ShelfLifeRule(models.Model):
     component = models.CharField(max_length=64, unique=True)
     days = models.PositiveIntegerField()

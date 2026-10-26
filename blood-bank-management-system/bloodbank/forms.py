@@ -1,6 +1,7 @@
 from django import forms
 from django.utils import timezone
-from .models import Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor, LabResult, Reservation
+from .models import (COMPONENT_CODES, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
+                     LabResult, Reservation)
 
 
 class DonorForm(forms.ModelForm):
@@ -77,16 +78,25 @@ class DonationForm(forms.Form):
     donor = forms.ModelChoiceField(queryset=Donor.objects.all())
     branch = forms.ModelChoiceField(queryset=Branch.objects.all())
     blood_group = forms.ChoiceField(choices=[(x, x) for x in ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]])
-    component = forms.ChoiceField(
-        choices=[
-            ("Packed Red Cells", "Packed Red Cells"),
-            ("Platelets", "Platelets"),
-            ("Plasma", "Plasma"),
-        ]
-    )
-    volume_ml = forms.IntegerField(min_value=1)
 
     def __init__(self, *args, branch=None, **kwargs):
         super().__init__(*args, **kwargs)
         if branch is not None:
             self.fields["branch"].initial = branch
+        # One optional volume per component; each component with a volume becomes its own unit (FR-09).
+        for component, code in COMPONENT_CODES.items():
+            self.fields[f"volume_{code.lower()}"] = forms.IntegerField(
+                min_value=1, required=False, label=f"{component} volume (ml)"
+            )
+
+    def clean(self):
+        cleaned = super().clean()
+        components = {}
+        for component, code in COMPONENT_CODES.items():
+            volume = cleaned.get(f"volume_{code.lower()}")
+            if volume:
+                components[component] = volume
+        if not components:
+            raise forms.ValidationError("Enter a volume for at least one component unit.")
+        cleaned["components"] = components
+        return cleaned

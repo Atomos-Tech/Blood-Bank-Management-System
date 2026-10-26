@@ -1,9 +1,10 @@
 from datetime import timedelta
-from django.db import transaction
+import uuid
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.core.mail import send_mail
 from django.utils import timezone
-from .models import (Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral,
+from .models import (COMPONENT_CODES, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation,
                      EligibilityRule, Issue, LabResult, Notification, Reservation, RequestTransition,
                      ShelfLifeRule, TestType, UserProfile)
 
@@ -40,8 +41,59 @@ def calculate_expiry(component, collected_at):
     """FR-15: expiry = collection time + configured shelf-life days for the component."""
     rule = ShelfLifeRule.objects.filter(component=component).first()
     if not rule:
-        raise ValueError(f"No approved shelf-life rule exists for {component}.")
+        raise ValueError(f"No approved shelf-life rule exists for this component ({component}).")
     return collected_at + timedelta(days=rule.days)
+
+
+def new_donation_id(collected_at):
+    """FR-09: random suffix keeps IDs unique even for donations recorded in the same instant."""
+    return f"DON-{collected_at:%Y%m%d}-{uuid.uuid4().hex[:12].upper()}"
+
+
+def record_donation(donor, branch, collector, blood_group, components, collected_at=None):
+    """FR-09, FR-10, FR-15: record one donation and one uniquely identified unit per prepared component.
+
+    `components` maps component name to volume in ml. Every unit links back to the donation and so
+    to the donor. Nothing is stored when any component lacks a shelf-life rule.
+    """
+    if not components:
+        raise ValueError("At least one component unit is required.")
+    collected_at = collected_at or timezone.now()
+    expiries = {component: calculate_expiry(component, collected_at) for component in components}
+    for attempt in range(5):
+        try:
+            with transaction.atomic():
+                donation = Donation.objects.create(
+                    donation_id=new_donation_id(collected_at),
+                    donor=donor,
+                    collected_at=collected_at,
+                    collector=collector,
+                    branch=branch,
+                )
+                units = [
+                    BloodUnit.objects.create(
+                        unit_id=f"{donation.donation_id}-{COMPONENT_CODES.get(component, component[:3].upper())}",
+                        donation=donation,
+                        blood_group=blood_group,
+                        component=component,
+                        volume_ml=volume,
+                        expiry_at=expiries[component],
+                        branch=branch,
+                        status=BloodUnit.Status.COLLECTED,
+                    )
+                    for component, volume in components.items()
+                ]
+                audit(
+                    collector,
+                    "DONATION_RECORDED",
+                    donation,
+                    summary=", ".join(u.unit_id for u in units),
+                    branch=branch,
+                )
+            return donation, units
+        except IntegrityError:
+            if attempt == 4:
+                raise
 
 
 def eligibility(donor):

@@ -17,7 +17,7 @@ from .forms import (AppointmentForm, BloodRequestForm, CrossMatchForm, DeferralF
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
                      Reservation, TestType, UserProfile)
-from .services import (audit, calculate_expiry, check_stock_and_expiry_alerts, eligibility, expire_units,
+from .services import (audit, check_stock_and_expiry_alerts, eligibility, expire_units, record_donation,
                        get_branch_warnings, issue_reservation, notify, release_reservation,
                        release_screened_unit, reserve_units, transition_request)
 
@@ -394,40 +394,27 @@ def donation_view(request):
             return deny(request.user, "Cross-branch donation recording denied")
         if data["donor"].branch_id and not in_branch_scope(request.user, data["donor"].branch_id):
             return deny(request.user, "Cross-branch donor donation denied")
-        stamp = timezone.now()
         try:
-            expiry_at = calculate_expiry(data["component"], stamp)
-        except ValueError:
-            form.add_error("component", "No approved shelf-life rule exists for this component.")
+            donation, units = record_donation(
+                donor=data["donor"],
+                branch=data["branch"],
+                collector=request.user,
+                blood_group=data["blood_group"],
+                components=data["components"],
+            )
+        except ValueError as e:
+            form.add_error(None, str(e))
         else:
-            with transaction.atomic():
-                donation = Donation.objects.create(
-                    donation_id=f"DON-{stamp:%Y%m%d%H%M%S%f}",
-                    donor=data["donor"],
-                    collected_at=stamp,
-                    collector=request.user,
-                    branch=data["branch"],
-                )
-                unit = BloodUnit.objects.create(
-                    unit_id=f"UNIT-{stamp:%Y%m%d%H%M%S%f}",
-                    donation=donation,
-                    blood_group=data["blood_group"],
-                    component=data["component"],
-                    volume_ml=data["volume_ml"],
-                    expiry_at=expiry_at,
-                    branch=data["branch"],
-                    status=BloodUnit.Status.COLLECTED,
-                )
-                audit(request.user, "DONATION_RECORDED", donation, summary=unit.unit_id, branch=data["branch"])
             messages.success(
                 request,
-                f"Donation and unit {unit.unit_id} recorded. Expiry was calculated from the configured shelf-life rule.",
+                f"Donation {donation.donation_id} recorded with unit(s) {', '.join(u.unit_id for u in units)}. "
+                "Expiry was calculated from the configured shelf-life rule.",
             )
             return redirect("inventory")
     return render(
         request,
         "bloodbank/form.html",
-        {"title": "Record donation and component unit", "form": form, "cancel": "inventory"},
+        {"title": "Record donation and component units", "form": form, "cancel": "inventory"},
     )
 
 
