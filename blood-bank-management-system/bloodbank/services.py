@@ -36,6 +36,14 @@ def notify(recipient, subject, body):
     return notification
 
 
+def calculate_expiry(component, collected_at):
+    """FR-15: expiry = collection time + configured shelf-life days for the component."""
+    rule = ShelfLifeRule.objects.filter(component=component).first()
+    if not rule:
+        raise ValueError(f"No approved shelf-life rule exists for {component}.")
+    return collected_at + timedelta(days=rule.days)
+
+
 def eligibility(donor):
     reasons = []
     rule = EligibilityRule.objects.filter(active=True).order_by("id").first()

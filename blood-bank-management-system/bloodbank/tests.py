@@ -33,6 +33,7 @@ from .models import (
     UserProfile,
 )
 from .services import (
+    calculate_expiry,
     check_stock_and_expiry_alerts,
     eligibility,
     issue_reservation,
@@ -1002,3 +1003,56 @@ class DonationCollectionDetailsTests(TestCase):
         self.client.force_login(self.staff)
         self.client.post("/donations/new/", dict(self.valid_post, collector=other.pk))
         self.assertEqual(Donation.objects.get().collector, self.staff)
+
+
+class ShelfLifeExpiryTests(TestCase):
+    """BB-22 [FR-15] & TC-F08: Calculate expiry from collection time and shelf-life rule."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Expiry Branch", code="EXPB")
+        for component, days in [("Packed Red Cells", 35), ("Platelets", 5), ("Plasma", 365)]:
+            ShelfLifeRule.objects.create(component=component, days=days)
+        self.staff = User.objects.create_user("expiry@bbms.test", email="expiry@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="Expiry Donor",
+            email="expirydonor@example.test",
+            phone="9000000102",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="B+",
+            consent_given=True,
+        )
+
+    def test_tc_f08_expiry_is_collection_time_plus_configured_days_per_component(self):
+        collected = timezone.now().replace(microsecond=0)
+        for component, days in [("Packed Red Cells", 35), ("Platelets", 5), ("Plasma", 365)]:
+            self.assertEqual(calculate_expiry(component, collected), collected + timedelta(days=days))
+
+    def test_tc_f08_recorded_unit_uses_configured_rule(self):
+        self.client.force_login(self.staff)
+        self.client.post(
+            "/donations/new/",
+            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "B+", "component": "Platelets", "volume_ml": 250},
+        )
+        unit = BloodUnit.objects.select_related("donation").get()
+        self.assertEqual(unit.expiry_at, unit.donation.collected_at + timedelta(days=5))
+
+    def test_tc_f08_changed_rule_applies_to_new_units(self):
+        ShelfLifeRule.objects.filter(component="Plasma").update(days=180)
+        collected = timezone.now()
+        self.assertEqual(calculate_expiry("Plasma", collected), collected + timedelta(days=180))
+
+    def test_tc_f08_recording_blocked_without_rule(self):
+        ShelfLifeRule.objects.filter(component="Plasma").delete()
+        with self.assertRaises(ValueError):
+            calculate_expiry("Plasma", timezone.now())
+        self.client.force_login(self.staff)
+        resp = self.client.post(
+            "/donations/new/",
+            {"donor": self.donor.pk, "branch": self.branch.pk, "blood_group": "B+", "component": "Plasma", "volume_ml": 250},
+        )
+        self.assertContains(resp, "No approved shelf-life rule exists for this component.")
+        self.assertEqual(Donation.objects.count(), 0)
+        self.assertEqual(BloodUnit.objects.count(), 0)

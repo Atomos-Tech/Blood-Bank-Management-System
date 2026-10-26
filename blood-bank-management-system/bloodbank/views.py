@@ -1,4 +1,3 @@
-from datetime import timedelta
 import json
 import uuid
 from django.contrib import messages
@@ -17,8 +16,8 @@ from .forms import (AppointmentForm, BloodRequestForm, CrossMatchForm, DeferralF
                     DonorForm, DonationForm, LabResultForm)
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
-                     Reservation, ShelfLifeRule, TestType, UserProfile)
-from .services import (audit, check_stock_and_expiry_alerts, eligibility, expire_units,
+                     Reservation, TestType, UserProfile)
+from .services import (audit, calculate_expiry, check_stock_and_expiry_alerts, eligibility, expire_units,
                        get_branch_warnings, issue_reservation, notify, release_reservation,
                        release_screened_unit, reserve_units, transition_request)
 
@@ -395,12 +394,13 @@ def donation_view(request):
             return deny(request.user, "Cross-branch donation recording denied")
         if data["donor"].branch_id and not in_branch_scope(request.user, data["donor"].branch_id):
             return deny(request.user, "Cross-branch donor donation denied")
-        rule = ShelfLifeRule.objects.filter(component=data["component"]).first()
-        if not rule:
+        stamp = timezone.now()
+        try:
+            expiry_at = calculate_expiry(data["component"], stamp)
+        except ValueError:
             form.add_error("component", "No approved shelf-life rule exists for this component.")
         else:
             with transaction.atomic():
-                stamp = timezone.now()
                 donation = Donation.objects.create(
                     donation_id=f"DON-{stamp:%Y%m%d%H%M%S%f}",
                     donor=data["donor"],
@@ -414,7 +414,7 @@ def donation_view(request):
                     blood_group=data["blood_group"],
                     component=data["component"],
                     volume_ml=data["volume_ml"],
-                    expiry_at=stamp + timedelta(days=rule.days),
+                    expiry_at=expiry_at,
                     branch=data["branch"],
                     status=BloodUnit.Status.COLLECTED,
                 )
