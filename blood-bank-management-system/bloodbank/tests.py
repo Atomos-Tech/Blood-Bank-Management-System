@@ -35,11 +35,13 @@ from .models import (
 from .services import (
     calculate_expiry,
     UNIT_TRANSITIONS,
+    DuplicateLabResult,
     InvalidUnitTransition,
     check_stock_and_expiry_alerts,
     discard_unit,
     expire_units,
     record_donation,
+    record_lab_result,
     eligibility,
     issue_reservation,
     release_reservation,
@@ -1291,3 +1293,91 @@ class UnitStateTransitionTests(TestCase):
         self.assertTrue(
             AuditEvent.objects.filter(event_type="UNIT_EXPIRED", record_id=str(unit.pk), actor=None).exists()
         )
+
+
+class ScreeningFixtureMixin:
+    """Shared screening fixtures: a five-test mandatory panel, one optional test and a unit factory."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Lab Branch", code="LAB")
+        self.staff = User.objects.create_user("labstaff@bbms.test", email="labstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        donor = Donor.objects.create(
+            branch=self.branch,
+            full_name="Lab Donor",
+            email="labdonor@example.test",
+            phone="9000000105",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70,
+            blood_group="O+",
+            consent_given=True,
+        )
+        self.donation = Donation.objects.create(
+            donation_id="DON-LAB-1", donor=donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+        self.panel = [TestType.objects.create(name=n, required=True) for n in ["HIV", "HBV", "HCV", "Syphilis", "Malaria"]]
+        self.optional = TestType.objects.create(name="CMV", required=False)
+        self.counter = 0
+
+    def make_unit(self, status=BloodUnit.Status.COLLECTED):
+        self.counter += 1
+        return BloodUnit.objects.create(
+            unit_id=f"UNIT-LAB-{self.counter}",
+            donation=self.donation,
+            blood_group="O+",
+            component="Packed Red Cells",
+            volume_ml=280,
+            expiry_at=timezone.now() + timedelta(days=30),
+            branch=self.branch,
+            status=status,
+        )
+
+
+class LabResultRecordingTests(ScreeningFixtureMixin, TestCase):
+    """BB-18 [FR-11] & TC-F07: Store results for the mandatory infection test panel."""
+
+    def test_tc_f07_result_records_outcome_staff_and_time(self):
+        unit = self.make_unit()
+        before = timezone.now()
+        result = record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
+        result.refresh_from_db()
+        self.assertEqual(result.outcome, LabResult.Outcome.ACCEPTABLE)
+        self.assertEqual(result.recorded_by, self.staff)
+        self.assertGreaterEqual(result.recorded_at, before)
+        self.assertTrue(AuditEvent.objects.filter(event_type="LAB_RESULT_RECORDED", record_id=str(unit.pk)).exists())
+
+    def test_tc_f07_first_result_moves_unit_from_collected_to_testing(self):
+        unit = self.make_unit()
+        record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, BloodUnit.Status.TESTING)
+
+    def test_tc_f07_one_result_per_test_type_per_unit(self):
+        unit = self.make_unit()
+        record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
+        with self.assertRaisesMessage(DuplicateLabResult, "A result for this test type is already recorded."):
+            record_lab_result(unit, self.panel[0], LabResult.Outcome.REACTIVE, self.staff)
+        self.assertEqual(LabResult.objects.filter(unit=unit, test_type=self.panel[0]).count(), 1)
+        self.assertEqual(LabResult.objects.get(unit=unit, test_type=self.panel[0]).outcome, LabResult.Outcome.ACCEPTABLE)
+
+    def test_tc_f07_duplicate_rejected_in_the_screening_form(self):
+        unit = self.make_unit()
+        record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
+        self.client.force_login(self.staff)
+        resp = self.client.post(f"/inventory/{unit.pk}/screen/", {"test_type": self.panel[0].pk, "outcome": "REACTIVE"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "A result for this test type is already recorded.")
+
+    def test_tc_f07_panel_is_the_configured_required_test_types(self):
+        unit = self.make_unit()
+        self.client.force_login(self.staff)
+        page = self.client.get(f"/inventory/{unit.pk}/screen/")
+        self.assertEqual([t.name for t in page.context["panel"]], ["HBV", "HCV", "HIV", "Malaria", "Syphilis"])
+        self.assertNotIn(self.optional, page.context["panel"])
+
+    def test_results_cannot_be_added_once_unit_left_screening(self):
+        for status in [BloodUnit.Status.AVAILABLE, BloodUnit.Status.QUARANTINED, BloodUnit.Status.ISSUED]:
+            unit = self.make_unit(status=status)
+            with self.assertRaisesMessage(ValueError, "Results can only be recorded while the unit is Collected or Testing."):
+                record_lab_result(unit, self.panel[0], LabResult.Outcome.ACCEPTABLE, self.staff)
+            self.assertFalse(LabResult.objects.filter(unit=unit).exists())

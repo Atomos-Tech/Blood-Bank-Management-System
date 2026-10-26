@@ -17,7 +17,8 @@ from .forms import (AppointmentForm, BloodRequestForm, CrossMatchForm, DeferralF
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
                      Reservation, TestType, UserProfile)
-from .services import (audit, check_stock_and_expiry_alerts, discard_unit, eligibility, expire_units, record_donation,
+from .services import (DuplicateLabResult, audit, check_stock_and_expiry_alerts, discard_unit, eligibility,
+                       expire_units, record_donation, record_lab_result,
                        get_branch_warnings, issue_reservation, notify, release_reservation,
                        release_screened_unit, reserve_units, transition_request)
 
@@ -428,13 +429,12 @@ def screening_view(request, pk):
         return deny(request.user, "Cross-branch unit screening denied")
     form = LabResultForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        result = form.save(commit=False)
-        result.unit = unit
-        result.recorded_by = request.user
         try:
-            result.save()
-        except IntegrityError:
-            form.add_error("test_type", "A result for this test type is already recorded.")
+            record_lab_result(unit, form.cleaned_data["test_type"], form.cleaned_data["outcome"], request.user)
+        except DuplicateLabResult as e:
+            form.add_error("test_type", str(e))
+        except ValueError as e:
+            form.add_error(None, str(e))
         else:
             release_screened_unit(unit, request.user)
             messages.success(request, f"Result recorded. Unit is now {unit.get_status_display()}.")
@@ -442,7 +442,12 @@ def screening_view(request, pk):
     return render(
         request,
         "bloodbank/screening.html",
-        {"unit": unit, "form": form, "results": unit.lab_results.select_related("test_type")},
+        {
+            "unit": unit,
+            "form": form,
+            "results": unit.lab_results.select_related("test_type", "recorded_by").order_by("recorded_at"),
+            "panel": TestType.objects.filter(required=True).order_by("name"),
+        },
     )
 
 

@@ -287,6 +287,28 @@ def issue_reservation(reservation, user):
         transition_request(reservation.request, BloodRequest.Status.PARTIAL, user)
 
 
+class DuplicateLabResult(ValueError):
+    pass
+
+
+def record_lab_result(unit, test_type, outcome, user):
+    """FR-11: store one result per configured test type per unit, with the recording staff member and time."""
+    if unit.status not in (BloodUnit.Status.COLLECTED, BloodUnit.Status.TESTING):
+        raise ValueError("Results can only be recorded while the unit is Collected or Testing.")
+    if outcome not in LabResult.Outcome.values:
+        raise ValueError("Unknown laboratory outcome.")
+    with transaction.atomic():
+        try:
+            with transaction.atomic():
+                result = LabResult.objects.create(unit=unit, test_type=test_type, outcome=outcome, recorded_by=user)
+        except IntegrityError:
+            raise DuplicateLabResult("A result for this test type is already recorded.")
+        if unit.status == BloodUnit.Status.COLLECTED:
+            transition_unit(unit, BloodUnit.Status.TESTING, user, reason="Screening started")
+        audit(user, "LAB_RESULT_RECORDED", unit, summary=f"{test_type.name}: {outcome}", branch=unit.branch)
+    return result
+
+
 @transaction.atomic
 def release_screened_unit(unit, user):
     if unit.status == BloodUnit.Status.COLLECTED:
