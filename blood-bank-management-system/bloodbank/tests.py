@@ -1015,6 +1015,14 @@ class DonationCollectionDetailsTests(TestCase):
         self.client.post("/donations/new/", dict(self.valid_post, collector=other.pk))
         self.assertEqual(Donation.objects.get().collector, self.staff)
 
+    def test_staff_reach_donation_recording_from_inventory(self):
+        self.client.force_login(self.staff)
+        self.assertContains(self.client.get("/inventory/"), 'href="/donations/new/"')
+        hospital = User.objects.create_user("collhosp@bbms.test", email="collhosp@bbms.test", password="pw")
+        UserProfile.objects.create(user=hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="H")
+        self.client.force_login(hospital)
+        self.assertNotContains(self.client.get("/inventory/"), 'href="/donations/new/"')
+
 
 class ShelfLifeExpiryTests(TestCase):
     """BB-22 [FR-15] & TC-F08: Calculate expiry from collection time and shelf-life rule."""
