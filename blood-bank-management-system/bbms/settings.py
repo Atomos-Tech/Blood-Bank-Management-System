@@ -42,6 +42,17 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "login"
+# SEC-03: the failed-login counter and the lockout flag have to be visible to every worker
+# process, so the cache is database-backed (migration 0007) instead of per-process local memory.
+# Sessions share this cache, so the row limit is well above DatabaseCache's default of 300;
+# culling a live lockout would hand an attacker a fresh set of attempts.
+CACHES = {
+    "default": {
+        "BACKEND": os.environ.get("BBMS_CACHE_BACKEND", "django.core.cache.backends.db.DatabaseCache"),
+        "LOCATION": os.environ.get("BBMS_CACHE_LOCATION", "bbms_cache"),
+        "OPTIONS": {"MAX_ENTRIES": 50000, "CULL_FREQUENCY": 4},
+    }
+}
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"

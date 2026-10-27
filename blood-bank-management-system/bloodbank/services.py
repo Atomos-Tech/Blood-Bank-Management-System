@@ -1,5 +1,10 @@
 from datetime import timedelta
+from importlib import import_module
 import uuid
+from django.conf import settings
+from django.contrib.auth.models import User
+from django.contrib.sessions.models import Session
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Q
 from django.core.mail import send_mail
@@ -9,19 +14,193 @@ from .models import (COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AuditEve
                      ShelfLifeRule, TestType, UserProfile)
 
 
+def audit_reference(user, event_type, record_type, record_id, outcome="SUCCESS", summary="", branch=None):
+    """FR-30: audit an action whose subject is not a live model row - a sign-in attempt for an
+    address that may not exist, or a configuration row that has just been deleted."""
+    AuditEvent.objects.create(
+        actor=user if getattr(user, "is_authenticated", False) else None,
+        branch=branch,
+        event_type=event_type,
+        record_type=record_type,
+        record_id=str(record_id)[:64],
+        outcome=outcome,
+        summary=summary,
+    )
+
+
 def audit(user, event_type, record, outcome="SUCCESS", summary="", branch=None):
     resolved_branch = branch or getattr(record, "branch", None) or getattr(getattr(user, "profile", None), "branch", None)
     if isinstance(record, Branch):
         resolved_branch = record
-    AuditEvent.objects.create(
-        actor=user if getattr(user, "is_authenticated", False) else None,
-        branch=resolved_branch,
-        event_type=event_type,
-        record_type=record.__class__.__name__,
-        record_id=str(record.pk),
-        outcome=outcome,
-        summary=summary,
+    audit_reference(
+        user, event_type, record.__class__.__name__, record.pk,
+        outcome=outcome, summary=summary, branch=resolved_branch,
     )
+
+
+# SEC-03 / SRS 6.2: five failures inside ten minutes lock the account for fifteen minutes.
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_FAILURE_WINDOW_SECONDS = 600
+LOGIN_LOCKOUT_SECONDS = 900
+# SEC-10: one message for every authentication failure, so no attempt reveals whether an
+# address is registered, holds a different password, or is locked.
+GENERIC_LOGIN_ERROR = "Invalid email or password."
+
+
+def _failure_key(email):
+    return f"login-failures:{email[:200]}"
+
+
+def _lock_key(email):
+    return f"login-locked:{email[:200]}"
+
+
+def account_is_locked(email):
+    return bool(cache.get(_lock_key(email)))
+
+
+def record_login_failure(email):
+    """SEC-03 / FR-30: count one failed sign-in and lock the account once the limit is reached.
+
+    The ten-minute window starts at the first failure rather than being pushed forward by each
+    one, so attempts spread more thinly than the limit never add up to a lockout. The counter
+    and the lock live in the shared database cache, so every worker sees the same tally.
+    Returns True when this failure locked the account.
+    """
+    now = timezone.now().timestamp()
+    window = cache.get(_failure_key(email)) or {}
+    started = window.get("started", now)
+    count = window.get("count", 0)
+    if now - started >= LOGIN_FAILURE_WINDOW_SECONDS:
+        started, count = now, 0
+    count += 1
+    cache.set(
+        _failure_key(email), {"count": count, "started": started},
+        max(1, int(LOGIN_FAILURE_WINDOW_SECONDS - (now - started))),
+    )
+    audit_reference(
+        None, "LOGIN_FAILED", "Authentication", email, outcome="DENIED",
+        summary=f"Failed sign-in attempt {count} of {LOGIN_FAILURE_LIMIT}",
+    )
+    if count < LOGIN_FAILURE_LIMIT:
+        return False
+    cache.set(_lock_key(email), True, LOGIN_LOCKOUT_SECONDS)
+    cache.delete(_failure_key(email))
+    audit_reference(
+        None, "ACCOUNT_LOCKED", "Authentication", email, outcome="DENIED",
+        summary=(
+            f"Locked for {LOGIN_LOCKOUT_SECONDS // 60} minutes after {LOGIN_FAILURE_LIMIT} "
+            f"failed attempts within {LOGIN_FAILURE_WINDOW_SECONDS // 60} minutes"
+        ),
+    )
+    return True
+
+
+def clear_login_failures(email):
+    cache.delete(_failure_key(email))
+    cache.delete(_lock_key(email))
+
+
+class LastAdministrator(ValueError):
+    pass
+
+
+def end_user_sessions(user):
+    """FR-26: an account that has just been deactivated loses its open sessions at once instead
+    of staying signed in until they expire. Deleting through the configured session store clears
+    both the database row and the cached copy."""
+    store = import_module(settings.SESSION_ENGINE).SessionStore
+    ended = 0
+    for session in Session.objects.filter(expire_date__gte=timezone.now()):
+        if session.get_decoded().get("_auth_user_id") == str(user.pk):
+            store(session_key=session.session_key).delete()
+            ended += 1
+    return ended
+
+
+def other_active_administrators(profile):
+    """FR-26 / UC-06: administrators other than this one who could still manage accounts."""
+    return UserProfile.objects.filter(
+        role=UserProfile.Role.ADMIN, active=True,
+    ).exclude(pk=profile.pk).count()
+
+
+def create_account(actor, email, full_name, role, branch, password, hospital_name=""):
+    """FR-26: one account with exactly one role. The password is only ever stored as the adaptive
+    hash Django's configured hasher produces (SEC-02); it is never written to the audit trail."""
+    first, _, last = full_name.strip().partition(" ")
+    with transaction.atomic():
+        user = User.objects.create_user(
+            username=email, email=email, password=password, first_name=first, last_name=last,
+        )
+        if role == UserProfile.Role.ADMIN:
+            # SRS Table 4: the administrator configures branches, slots, rules and thresholds
+            # through the Django admin, which the demonstration seed also grants this way.
+            user.is_staff = True
+            user.is_superuser = True
+            user.save(update_fields=["is_staff", "is_superuser"])
+        profile = UserProfile.objects.create(
+            user=user, role=role, branch=branch, hospital_name=hospital_name, active=True,
+        )
+        audit(
+            actor, "USER_ACCOUNT_CREATED", user,
+            summary=f"{email} created as {profile.get_role_display()}"
+                    + (f" at {branch.code}" if branch else ""),
+            branch=branch,
+        )
+    return profile
+
+
+def set_account_active(profile, active, actor):
+    """FR-26: activate or deactivate an account, audit it, and refuse to leave the system without
+    an administrator who can undo the change."""
+    if not active and profile.role == UserProfile.Role.ADMIN and other_active_administrators(profile) == 0:
+        audit(
+            actor, "USER_ACCOUNT_DEACTIVATED", profile.user, outcome="REJECTED",
+            summary=f"Refused: {profile.user.username} is the last active administrator",
+        )
+        raise LastAdministrator("The last active administrator cannot be deactivated.")
+    with transaction.atomic():
+        profile.active = active
+        profile.save(update_fields=["active"])
+        ended = 0 if active else end_user_sessions(profile.user)
+        audit(
+            actor, "USER_ACCOUNT_ACTIVATED" if active else "USER_ACCOUNT_DEACTIVATED", profile.user,
+            summary=(
+                f"{profile.user.username} activated" if active
+                else f"{profile.user.username} deactivated; {ended} open session(s) ended"
+            ),
+            branch=profile.branch,
+        )
+    return profile
+
+
+def assign_account_role(profile, role, branch, actor):
+    """FR-26: exactly one role per account, with the branch the role is scoped to (NFR-09)."""
+    losing_last_admin = (
+        profile.role == UserProfile.Role.ADMIN
+        and role != UserProfile.Role.ADMIN
+        and profile.active
+        and other_active_administrators(profile) == 0
+    )
+    if losing_last_admin:
+        audit(
+            actor, "USER_ROLE_ASSIGNED", profile.user, outcome="REJECTED",
+            summary=f"Refused: {profile.user.username} is the last active administrator",
+        )
+        raise LastAdministrator("The last active administrator cannot be given another role.")
+    previous = profile.get_role_display()
+    with transaction.atomic():
+        profile.role = role
+        profile.branch = branch
+        profile.save(update_fields=["role", "branch"])
+        audit(
+            actor, "USER_ROLE_ASSIGNED", profile.user,
+            summary=f"{profile.user.username}: {previous} to {profile.get_role_display()}"
+                    + (f" at {branch.code}" if branch else ""),
+            branch=branch,
+        )
+    return profile
 
 
 _U = BloodUnit.Status

@@ -6,14 +6,21 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+from django.conf import settings
+from django.contrib.auth.hashers import check_password, identify_hasher
 from django.contrib.auth.models import User
+from django.contrib.sessions.models import Session
+from django.core.cache import cache
 from django.core.management import call_command
 from django.db import IntegrityError
+from django.urls import reverse
 import threading
 
 from django.db import connection
-from django.test import TestCase, TransactionTestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.utils import timezone
+
+from . import urls as bloodbank_urls
 
 from .models import (
     SCREENING_QUESTIONS,
@@ -41,10 +48,23 @@ from .models import (
 )
 from .services import (
     AppointmentError,
+    GENERIC_LOGIN_ERROR,
+    LOGIN_FAILURE_LIMIT,
+    LOGIN_FAILURE_WINDOW_SECONDS,
+    LOGIN_LOCKOUT_SECONDS,
+    LastAdministrator,
+    _failure_key,
+    account_is_locked,
+    assign_account_role,
     book_appointment,
     cancel_appointment,
+    clear_login_failures,
+    create_account,
+    end_user_sessions,
     next_eligible_date,
     calculate_expiry,
+    record_login_failure,
+    set_account_active,
     UNIT_TRANSITIONS,
     DuplicateLabResult,
     InvalidUnitTransition,
@@ -1784,6 +1804,7 @@ class RolePermissionMatrixTests(TestCase):
             "ADMIN": make_user("mx_admin", UserProfile.Role.ADMIN),
         }
         self.other_staff = make_user("mx_other_staff", UserProfile.Role.STAFF, branch=self.other_branch)
+        self.donor_profile = self.users["DONOR"].profile
         staff, hospital = self.users["STAFF"], self.users["HOSPITAL"]
 
         self.donor = Donor.objects.create(
@@ -1873,6 +1894,9 @@ class RolePermissionMatrixTests(TestCase):
             ("post", f"/reservations/{self.reservation.pk}/issue/", {}, {S}),
             ("post", f"/reservations/{self.reservation.pk}/release/", {}, {S}),
             ("get", "/audit/", None, {S, A}),
+            ("get", "/accounts/", None, {A}),
+            ("post", f"/accounts/{self.donor_profile.pk}/status/", {"active": "0"}, {A}),
+            ("post", f"/accounts/{self.donor_profile.pk}/role/", {"role": "DONOR", "branch": ""}, {A}),
             ("get", "/reports/", None, {S, H, A}),
             ("post_json", "/api/v1/requests", new_request, {H}),
             ("patch_json", f"/api/v1/requests/{self.pending.pk}/status", json.dumps({"status": "APPROVED"}), {S}),
@@ -2811,3 +2835,536 @@ class CsrfAndOutputEncodingTests(TestCase):
         response = self.client.get("/requests/")
         self.assertNotContains(response, self.PAYLOAD)
         self.assertContains(response, "&lt;script&gt;")
+
+
+def protected_paths():
+    """Every bloodbank route except the sign-in pair, with placeholder arguments."""
+    paths = []
+    for pattern in bloodbank_urls.urlpatterns:
+        if pattern.name in {"login", "logout"}:
+            continue
+        args = ["approve" if group == "action" else 1 for group in pattern.pattern.regex.groupindex]
+        paths.append(reverse(pattern.name, args=args))
+    return paths
+
+
+class SprintOneSecurityFixture(TestCase):
+    """One account per role, used by the Sprint 0 and Sprint 1 authentication and account stories."""
+
+    PASSWORD = "Str0ng-Demo-Passphrase!"
+
+    def setUp(self):
+        cache.clear()
+        self.branch = Branch.objects.create(name="Sprint Branch", code="SPR")
+        self.users = {}
+        for role in UserProfile.Role:
+            email = f"{role.value.lower()}@sprint.test"
+            user = User.objects.create_user(email, email=email, password=self.PASSWORD)
+            UserProfile.objects.create(
+                user=user,
+                role=role,
+                branch=self.branch if role in {UserProfile.Role.STAFF, UserProfile.Role.HOSPITAL} else None,
+                hospital_name="Sprint Hospital" if role == UserProfile.Role.HOSPITAL else "",
+            )
+            self.users[role.value] = user
+
+    def tearDown(self):
+        cache.clear()
+
+    def sign_in(self, user, password=None, client=None):
+        return (client or self.client).post(
+            "/login/", {"email": user.username, "password": password or self.PASSWORD}
+        )
+
+    def rendered_messages(self, response):
+        return [str(message) for message in response.context["messages"]]
+
+
+class AuthenticationAcrossRolesTests(SprintOneSecurityFixture):
+    """BB-32 [FR-25] & TC-S01: Donor, Blood Bank Staff, Hospital Staff and System Administrator
+    all authenticate before any protected function is reachable."""
+
+    def test_tc_s01_each_role_signs_in_and_the_event_is_audited(self):
+        for role, user in self.users.items():
+            with self.subTest(role=role):
+                client = Client()
+                response = self.sign_in(user, client=client)
+                self.assertRedirects(response, "/", fetch_redirect_response=False)
+                self.assertEqual(client.session["_auth_user_id"], str(user.pk))
+                self.assertTrue(AuditEvent.objects.filter(actor=user, event_type="LOGIN").exists())
+
+    def test_tc_s01_a_deactivated_account_cannot_sign_in(self):
+        user = self.users["STAFF"]
+        user.profile.active = False
+        user.profile.save(update_fields=["active"])
+        response = self.sign_in(user)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertEqual(self.rendered_messages(response), [GENERIC_LOGIN_ERROR])
+        self.assertFalse(AuditEvent.objects.filter(actor=user, event_type="LOGIN").exists())
+
+    def test_tc_s01_a_wrong_password_never_starts_a_session(self):
+        response = self.sign_in(self.users["DONOR"], password="not-the-password")
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertEqual(self.rendered_messages(response), [GENERIC_LOGIN_ERROR])
+
+    def test_every_route_but_the_sign_in_pair_requires_an_authenticated_user(self):
+        """FR-25: read from urls.py, so a view added without login protection fails here."""
+        paths = protected_paths()
+        self.assertGreater(len(paths), 20)
+        for path in paths:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 302, f"{path} answered an anonymous request")
+                self.assertIn("/login/", response["Location"])
+
+
+class AccountLockoutTests(SprintOneSecurityFixture):
+    """BB-52 [SEC-03] & TC-S01: five failed sign-ins within ten minutes lock the account for
+    fifteen, the lock is shared between workers, and both are audited."""
+
+    def failures(self, user, count):
+        for _ in range(count):
+            self.sign_in(user, password="wrong-password", client=Client())
+
+    def test_tc_s01_five_failures_lock_the_account_and_the_lock_is_audited(self):
+        user = self.users["STAFF"]
+        self.failures(user, LOGIN_FAILURE_LIMIT - 1)
+        self.assertFalse(account_is_locked(user.username))
+        self.assertFalse(AuditEvent.objects.filter(event_type="ACCOUNT_LOCKED").exists())
+
+        self.failures(user, 1)
+        self.assertTrue(account_is_locked(user.username))
+
+        recorded = AuditEvent.objects.filter(event_type="LOGIN_FAILED", record_id=user.username)
+        self.assertEqual(recorded.count(), LOGIN_FAILURE_LIMIT)
+        self.assertEqual(set(recorded.values_list("outcome", flat=True)), {"DENIED"})
+        lockout = AuditEvent.objects.get(event_type="ACCOUNT_LOCKED", record_id=user.username)
+        self.assertEqual(lockout.outcome, "DENIED")
+        self.assertIn(f"{LOGIN_LOCKOUT_SECONDS // 60} minutes", lockout.summary)
+        self.assertIn(f"{LOGIN_FAILURE_WINDOW_SECONDS // 60} minutes", lockout.summary)
+
+    def test_tc_s01_the_correct_password_is_refused_while_the_account_is_locked(self):
+        user = self.users["STAFF"]
+        self.failures(user, LOGIN_FAILURE_LIMIT)
+        response = self.sign_in(user)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertEqual(self.rendered_messages(response), [GENERIC_LOGIN_ERROR])
+        self.assertTrue(
+            AuditEvent.objects.filter(event_type="LOGIN_BLOCKED", record_id=user.username).exists()
+        )
+
+    def test_sec_03_the_lock_is_held_in_the_shared_database_cache(self):
+        """A local-memory cache would give every worker process its own count of the attempts."""
+        self.assertEqual(
+            settings.CACHES["default"]["BACKEND"], "django.core.cache.backends.db.DatabaseCache"
+        )
+        self.failures(self.users["STAFF"], LOGIN_FAILURE_LIMIT)
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM {settings.CACHES['default']['LOCATION']}")
+            self.assertGreater(cursor.fetchone()[0], 0)
+
+    def test_sec_03_failures_spread_wider_than_the_window_never_add_up_to_a_lock(self):
+        user = self.users["STAFF"]
+        stale = timezone.now().timestamp() - LOGIN_FAILURE_WINDOW_SECONDS - 1
+        cache.set(
+            _failure_key(user.username),
+            {"count": LOGIN_FAILURE_LIMIT - 1, "started": stale},
+            LOGIN_FAILURE_WINDOW_SECONDS,
+        )
+        self.assertFalse(record_login_failure(user.username))
+        self.assertFalse(account_is_locked(user.username))
+        self.assertEqual(cache.get(_failure_key(user.username))["count"], 1)
+
+    def test_a_successful_sign_in_clears_the_counter(self):
+        user = self.users["STAFF"]
+        self.failures(user, LOGIN_FAILURE_LIMIT - 1)
+        self.sign_in(user)
+        self.assertIsNone(cache.get(_failure_key(user.username)))
+        self.assertFalse(account_is_locked(user.username))
+
+    def test_the_account_works_again_once_the_lock_expires(self):
+        user = self.users["STAFF"]
+        self.failures(user, LOGIN_FAILURE_LIMIT)
+        clear_login_failures(user.username)  # the entry's fifteen-minute lifetime, fast-forwarded
+        self.sign_in(user)
+        self.assertEqual(self.client.session["_auth_user_id"], str(user.pk))
+
+
+class GenericAuthenticationFailureTests(SprintOneSecurityFixture):
+    """BB-59 [SEC-10] & TC-S01: no sign-in failure reveals whether an address is registered."""
+
+    def test_tc_s01_unknown_wrong_deactivated_and_locked_all_answer_the_same(self):
+        staff, hospital = self.users["STAFF"], self.users["HOSPITAL"]
+        hospital.profile.active = False
+        hospital.profile.save(update_fields=["active"])
+
+        cases = {
+            "unknown email": Client().post(
+                "/login/", {"email": "nobody@sprint.test", "password": self.PASSWORD}
+            ),
+            "wrong password": self.sign_in(staff, password="wrong-password", client=Client()),
+            "deactivated account": self.sign_in(hospital, client=Client()),
+        }
+        self.failures_until_locked(staff)
+        cases["locked account"] = self.sign_in(staff, client=Client())
+
+        for label, response in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.rendered_messages(response), [GENERIC_LOGIN_ERROR])
+                self.assertContains(response, GENERIC_LOGIN_ERROR)
+
+    def failures_until_locked(self, user):
+        while not account_is_locked(user.username):
+            self.sign_in(user, password="wrong-password", client=Client())
+
+
+class PasswordStorageTests(SprintOneSecurityFixture):
+    """BB-51 [SEC-02]: passwords are stored only as an adaptive hash and are never logged."""
+
+    def test_sec_02_every_password_is_stored_with_djangos_adaptive_hasher(self):
+        for role, user in self.users.items():
+            with self.subTest(role=role):
+                self.assertIn(identify_hasher(user.password).algorithm, {"pbkdf2_sha256", "argon2"})
+                self.assertNotIn(self.PASSWORD, user.password)
+                self.assertTrue(check_password(self.PASSWORD, user.password))
+
+    def test_sec_02_the_configured_validators_refuse_a_weak_password(self):
+        self.client.force_login(self.users["ADMIN"])
+        response = self.client.post("/accounts/", {
+            "full_name": "Weak Password", "email": "weak@sprint.test",
+            "role": UserProfile.Role.DONOR, "branch": "", "hospital_name": "", "password": "123",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="weak@sprint.test").exists())
+        self.assertTrue(response.context["form"].errors["password"])
+
+    def test_sec_02_a_password_never_reaches_the_audit_trail_or_a_notification(self):
+        guess = "another-secret-guess"
+        self.client.force_login(self.users["ADMIN"])
+        self.client.post("/accounts/", {
+            "full_name": "New Staff", "email": "new.staff@sprint.test",
+            "role": UserProfile.Role.STAFF, "branch": self.branch.pk, "hospital_name": "",
+            "password": self.PASSWORD,
+        })
+        new_staff = User.objects.get(username="new.staff@sprint.test")
+        self.assertTrue(check_password(self.PASSWORD, new_staff.password))
+        self.sign_in(new_staff, client=Client())
+        self.sign_in(new_staff, password=guess, client=Client())
+
+        written = list(AuditEvent.objects.values_list("summary", flat=True))
+        written += list(AuditEvent.objects.values_list("record_id", flat=True))
+        written += list(Notification.objects.values_list("body", flat=True))
+        for text in written:
+            self.assertNotIn(self.PASSWORD, text)
+            self.assertNotIn(guess, text)
+
+
+class AdminUserManagementTests(SprintOneSecurityFixture):
+    """BB-33 [FR-26] & TC-S02: the administrator's in-app account screen, fully audited."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = self.users["ADMIN"]
+        self.client.force_login(self.admin)
+
+    def create_payload(self, **overrides):
+        payload = {
+            "full_name": "Nurse Nadia", "email": "nadia@sprint.test",
+            "role": UserProfile.Role.STAFF, "branch": self.branch.pk,
+            "hospital_name": "", "password": "Str0ng-New-Passphrase!",
+        }
+        payload.update(overrides)
+        return payload
+
+    def live_sessions_for(self, user):
+        return [
+            session for session in Session.objects.filter(expire_date__gte=timezone.now())
+            if session.get_decoded().get("_auth_user_id") == str(user.pk)
+        ]
+
+    def test_fr26_the_administrator_creates_an_account_with_one_role_and_one_branch(self):
+        self.client.post("/accounts/", self.create_payload())
+        profile = UserProfile.objects.get(user__username="nadia@sprint.test")
+        self.assertEqual(profile.role, UserProfile.Role.STAFF)
+        self.assertEqual(profile.branch, self.branch)
+        self.assertEqual(UserProfile.objects.filter(user=profile.user).count(), 1)
+        event = AuditEvent.objects.get(event_type="USER_ACCOUNT_CREATED", record_id=str(profile.user.pk))
+        self.assertEqual(event.actor, self.admin)
+        self.assertEqual(event.outcome, "SUCCESS")
+        signed_in = Client().post(
+            "/login/", {"email": "nadia@sprint.test", "password": "Str0ng-New-Passphrase!"}
+        )
+        self.assertRedirects(signed_in, "/", fetch_redirect_response=False)
+
+    def test_fr26_an_operational_role_is_refused_without_a_branch(self):
+        response = self.client.post("/accounts/", self.create_payload(branch=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="nadia@sprint.test").exists())
+        self.assertIn("branch", response.context["form"].errors)
+
+    def test_fr26_a_duplicate_email_is_refused(self):
+        response = self.client.post(
+            "/accounts/", self.create_payload(email=self.users["STAFF"].username)
+        )
+        self.assertIn("email", response.context["form"].errors)
+        self.assertEqual(User.objects.filter(username=self.users["STAFF"].username).count(), 1)
+
+    def test_tc_s02_only_the_administrator_reaches_the_account_screen(self):
+        for role in ["STAFF", "HOSPITAL", "DONOR"]:
+            with self.subTest(role=role):
+                client = Client()
+                client.force_login(self.users[role])
+                self.assertEqual(client.get("/accounts/").status_code, 403)
+                self.assertEqual(
+                    client.post(f"/accounts/{self.users[role].profile.pk}/status/", {"active": "0"}).status_code,
+                    403,
+                )
+                self.assertTrue(AuditEvent.objects.filter(
+                    actor=self.users[role], event_type="UNAUTHORIZED_ACCESS", outcome="DENIED",
+                ).exists())
+
+    def test_fr26_deactivation_blocks_the_next_sign_in_and_ends_open_sessions(self):
+        staff = self.users["STAFF"]
+        staff_client = Client()
+        self.sign_in(staff, client=staff_client)
+        self.assertEqual(staff_client.get("/donors/").status_code, 200)
+
+        self.client.post(f"/accounts/{staff.profile.pk}/status/", {"active": "0"})
+
+        staff.profile.refresh_from_db()
+        self.assertFalse(staff.profile.active)
+        self.assertEqual(self.live_sessions_for(staff), [])
+        self.assertEqual(staff_client.get("/donors/").status_code, 302)
+        refused = self.sign_in(staff, client=Client())
+        self.assertEqual(refused.status_code, 200)
+        event = AuditEvent.objects.filter(event_type="USER_ACCOUNT_DEACTIVATED").latest("created_at")
+        self.assertEqual(event.actor, self.admin)
+        self.assertIn("session(s) ended", event.summary)
+
+    def test_fr26_reactivation_is_audited_and_restores_sign_in(self):
+        staff = self.users["STAFF"]
+        set_account_active(staff.profile, False, self.admin)
+        self.client.post(f"/accounts/{staff.profile.pk}/status/", {"active": "1"})
+        staff.profile.refresh_from_db()
+        self.assertTrue(staff.profile.active)
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="USER_ACCOUNT_ACTIVATED", record_id=str(staff.pk),
+        ).exists())
+        self.assertRedirects(
+            self.sign_in(staff, client=Client()), "/", fetch_redirect_response=False
+        )
+
+    def test_fr26_assigning_a_role_replaces_the_previous_one_and_is_audited(self):
+        donor = self.users["DONOR"]
+        self.client.post(
+            f"/accounts/{donor.profile.pk}/role/",
+            {"role": UserProfile.Role.STAFF, "branch": self.branch.pk},
+        )
+        donor.profile.refresh_from_db()
+        self.assertEqual(donor.profile.role, UserProfile.Role.STAFF)
+        self.assertEqual(donor.profile.branch, self.branch)
+        self.assertEqual(UserProfile.objects.filter(user=donor).count(), 1)
+        event = AuditEvent.objects.get(event_type="USER_ROLE_ASSIGNED", record_id=str(donor.pk))
+        self.assertIn("Donor to Blood Bank Staff", event.summary)
+        client = Client()
+        client.force_login(donor)
+        self.assertEqual(client.get("/donors/").status_code, 200)
+
+    def test_fr26_a_role_change_to_an_operational_role_needs_a_branch(self):
+        donor = self.users["DONOR"]
+        self.client.post(
+            f"/accounts/{donor.profile.pk}/role/", {"role": UserProfile.Role.STAFF, "branch": ""}
+        )
+        donor.profile.refresh_from_db()
+        self.assertEqual(donor.profile.role, UserProfile.Role.DONOR)
+        self.assertFalse(AuditEvent.objects.filter(event_type="USER_ROLE_ASSIGNED").exists())
+
+    def test_uc06_the_last_active_administrator_cannot_be_deactivated_or_demoted(self):
+        profile = self.admin.profile
+        self.client.post(f"/accounts/{profile.pk}/status/", {"active": "0"})
+        profile.refresh_from_db()
+        self.assertTrue(profile.active)
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="USER_ACCOUNT_DEACTIVATED", outcome="REJECTED",
+        ).exists())
+
+        self.client.post(
+            f"/accounts/{profile.pk}/role/",
+            {"role": UserProfile.Role.STAFF, "branch": self.branch.pk},
+        )
+        profile.refresh_from_db()
+        self.assertEqual(profile.role, UserProfile.Role.ADMIN)
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="USER_ROLE_ASSIGNED", outcome="REJECTED",
+        ).exists())
+
+        with self.assertRaises(LastAdministrator):
+            set_account_active(profile, False, self.admin)
+        with self.assertRaises(LastAdministrator):
+            assign_account_role(profile, UserProfile.Role.DONOR, None, self.admin)
+
+    def test_uc06_a_second_administrator_makes_the_first_one_removable(self):
+        create_account(
+            self.admin, "second.admin@sprint.test", "Second Admin",
+            UserProfile.Role.ADMIN, None, "Str0ng-Second-Passphrase!",
+        )
+        profile = self.admin.profile
+        set_account_active(profile, False, self.admin)
+        profile.refresh_from_db()
+        self.assertFalse(profile.active)
+
+    def test_fr26_ending_sessions_leaves_other_accounts_signed_in(self):
+        staff, hospital = self.users["STAFF"], self.users["HOSPITAL"]
+        staff_client, hospital_client = Client(), Client()
+        self.sign_in(staff, client=staff_client)
+        self.sign_in(hospital, client=hospital_client)
+        self.assertEqual(end_user_sessions(staff), 1)
+        self.assertEqual(self.live_sessions_for(staff), [])
+        self.assertEqual(len(self.live_sessions_for(hospital)), 1)
+
+
+class AuditCoverageTests(SprintOneSecurityFixture):
+    """BB-37 [FR-30] & TC-S03: an audit event for every security-relevant category named in the SRS."""
+
+    def setUp(self):
+        super().setUp()
+        self.staff = self.users["STAFF"]
+        self.admin = self.users["ADMIN"]
+        self.admin.is_staff = True
+        self.admin.is_superuser = True
+        self.admin.save(update_fields=["is_staff", "is_superuser"])
+        EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+        ShelfLifeRule.objects.create(component="Plasma", days=365)
+        self.test_type = TestType.objects.create(name="HIV", required=True)
+        self.donor = Donor.objects.create(
+            branch=self.branch, full_name="Audit Donor", email="audit.donor@sprint.test",
+            phone="9000000111", date_of_birth=timezone.localdate() - timedelta(days=28 * 365),
+            weight_kg=72, blood_group="O+", medical_history="None", consent_given=True,
+        )
+        self.donation = Donation.objects.create(
+            donation_id="DON-AUD-1", donor=self.donor, collected_at=timezone.now(),
+            collector=self.staff, branch=self.branch,
+        )
+
+    def unit(self, unit_id, status):
+        return BloodUnit.objects.create(
+            unit_id=unit_id, donation=self.donation, blood_group="O+", component="Plasma",
+            volume_ml=220, expiry_at=timezone.now() + timedelta(days=30), branch=self.branch,
+            status=status,
+        )
+
+    def blood_request(self, reference, status):
+        return BloodRequest.objects.create(
+            hospital="Sprint Hospital", created_by=self.users["HOSPITAL"], branch=self.branch,
+            blood_group="O+", component="Plasma", quantity=1, priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1), clinical_reference=reference, status=status,
+        )
+
+    def exercise_every_category(self):
+        # Authentication: a success, a failure, a lockout and a sign-out.
+        self.sign_in(self.staff, client=Client())
+        signed_in = Client()
+        self.sign_in(self.staff, client=signed_in)
+        signed_in.post("/logout/")
+        locked_out = self.users["DONOR"]
+        for _ in range(LOGIN_FAILURE_LIMIT):
+            self.sign_in(locked_out, password="wrong-password", client=Client())
+
+        # Account management: creation, role assignment and deactivation.
+        created = create_account(
+            self.admin, "audited@sprint.test", "Audited Account",
+            UserProfile.Role.STAFF, self.branch, "Str0ng-Audited-Passphrase!",
+        )
+        assign_account_role(created, UserProfile.Role.DONOR, None, self.admin)
+        set_account_active(created, False, self.admin)
+
+        # Configuration: a threshold changed through the administrator's Django admin (FR-27).
+        admin_client = Client()
+        admin_client.force_login(self.admin)
+        admin_client.post(f"/admin/bloodbank/branch/{self.branch.pk}/change/", {
+            "name": self.branch.name, "code": self.branch.code,
+            "timezone_name": self.branch.timezone_name, "low_stock_threshold": 9,
+            "near_expiry_days": self.branch.near_expiry_days,
+        })
+
+        # Deferral.
+        staff_client = Client()
+        staff_client.force_login(self.staff)
+        staff_client.post("/deferrals/", {
+            "donor": self.donor.pk, "reason": "Low haemoglobin", "permanent": "",
+            "start_date": timezone.localdate().isoformat(),
+            "end_date": (timezone.localdate() + timedelta(days=30)).isoformat(),
+        })
+
+        # Screening and inventory.
+        screened = self.unit("UNIT-AUD-SCR", BloodUnit.Status.COLLECTED)
+        record_lab_result(screened, self.test_type, LabResult.Outcome.ACCEPTABLE, self.staff)
+        discard_unit(self.unit("UNIT-AUD-QUA", BloodUnit.Status.QUARANTINED), self.staff, "Reactive result")
+
+        # Request handling and issuance.
+        approved = self.blood_request("REF-AUD-1", BloodRequest.Status.PENDING)
+        transition_request(approved, BloodRequest.Status.APPROVED, self.staff)
+        self.unit("UNIT-AUD-AVL", BloodUnit.Status.AVAILABLE)
+        reservation = reserve_units(approved, self.staff)[0]
+        CrossMatch.objects.create(reservation=reservation, outcome="COMPATIBLE", recorded_by=self.staff)
+        issue_reservation(reservation, self.staff)
+
+    # FR-30: the categories the SRS lists, and the event types that cover each of them.
+    CATEGORIES = {
+        "authentication": ["LOGIN", "LOGOUT", "LOGIN_FAILED", "ACCOUNT_LOCKED"],
+        "account management": ["USER_ACCOUNT_CREATED", "USER_ROLE_ASSIGNED", "USER_ACCOUNT_DEACTIVATED"],
+        "configuration": ["CONFIGURATION_CHANGED"],
+        "deferral": ["DEFERRAL_RECORDED"],
+        "screening": ["LAB_RESULT_RECORDED", "SCREENING_REVIEWED"],
+        "inventory": ["UNIT_DISCARDED", "UNIT_RESERVED"],
+        "request": ["REQUEST_STATUS_CHANGED"],
+        "issuance": ["UNIT_ISSUED"],
+    }
+
+    def test_tc_s03_every_security_relevant_category_writes_an_audit_event(self):
+        self.exercise_every_category()
+        for category, event_types in self.CATEGORIES.items():
+            for event_type in event_types:
+                with self.subTest(category=category, event_type=event_type):
+                    self.assertTrue(
+                        AuditEvent.objects.filter(event_type=event_type).exists(),
+                        f"FR-30: no {event_type} event was written for {category}",
+                    )
+
+    def test_tc_s03_every_recorded_event_carries_the_fields_sec_07_requires(self):
+        self.exercise_every_category()
+        for event in AuditEvent.objects.all():
+            with self.subTest(event=event.event_type, record=event.record_id):
+                self.assertTrue(event.event_type)
+                self.assertTrue(event.record_type)
+                self.assertTrue(event.record_id)
+                self.assertTrue(event.outcome)
+                self.assertIsNotNone(event.created_at)
+
+    def test_fr30_a_configuration_change_names_the_administrator_and_the_changed_field(self):
+        admin_client = Client()
+        admin_client.force_login(self.admin)
+        admin_client.post(f"/admin/bloodbank/branch/{self.branch.pk}/change/", {
+            "name": self.branch.name, "code": self.branch.code,
+            "timezone_name": self.branch.timezone_name, "low_stock_threshold": 11,
+            "near_expiry_days": self.branch.near_expiry_days,
+        })
+        self.branch.refresh_from_db()
+        self.assertEqual(self.branch.low_stock_threshold, 11)
+        event = AuditEvent.objects.get(event_type="CONFIGURATION_CHANGED")
+        self.assertEqual(event.actor, self.admin)
+        self.assertEqual(event.branch, self.branch)
+        self.assertIn("low_stock_threshold", event.summary)
+
+    def test_fr30_a_deleted_configuration_row_is_still_audited(self):
+        admin_client = Client()
+        admin_client.force_login(self.admin)
+        rule = ShelfLifeRule.objects.get(component="Plasma")
+        admin_client.post(f"/admin/bloodbank/shelfliferule/{rule.pk}/delete/", {"post": "yes"})
+        self.assertFalse(ShelfLifeRule.objects.filter(pk=rule.pk).exists())
+        event = AuditEvent.objects.get(event_type="CONFIGURATION_DELETED")
+        self.assertEqual(event.record_id, str(rule.pk))
+        self.assertEqual(event.record_type, "ShelfLifeRule")

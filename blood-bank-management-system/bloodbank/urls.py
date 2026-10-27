@@ -24,6 +24,10 @@ urlpatterns = [
     path("reservations/<int:pk>/crossmatch/", views.crossmatch_view, name="crossmatch"),
     path("reservations/<int:pk>/issue/", views.issue_view, name="issue"),
     path("audit/", views.audit_view, name="audit"),
+    # FR-26: in-app account administration, reachable by the System Administrator only.
+    path("accounts/", views.account_admin, name="accounts"),
+    path("accounts/<int:pk>/status/", views.account_status, name="account_status"),
+    path("accounts/<int:pk>/role/", views.account_role, name="account_role"),
     path("reports/", views.reports, name="reports"),
     # SADS Section 8.2 REST API endpoints for Inventory & Request Service (FR-17 to FR-24)
     path("api/v1/inventory", views.api_inventory, name="api_inventory_noslash"),

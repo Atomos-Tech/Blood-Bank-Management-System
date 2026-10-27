@@ -30,3 +30,30 @@ performance:
       - any-glob-to-any-file:
           - "blood-bank-management-system/locustfile.py"
           - "blood-bank-management-system/scripts/**"
+
+auth:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/templates/bloodbank/login.html"
+          - "blood-bank-management-system/bloodbank/middleware.py"
+
+accounts:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/templates/bloodbank/accounts.html"
+          - "blood-bank-management-system/bloodbank/admin.py"
+
+audit:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/templates/bloodbank/audit.html"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/tests.py"
+
+migrations:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "blood-bank-management-system/bloodbank/migrations/**"
