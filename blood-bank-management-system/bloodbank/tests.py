@@ -2717,3 +2717,97 @@ class ConcurrentSlotBookingTests(TransactionTestCase):
                 self.assertEqual(booked, capacity)
                 self.assertEqual(outcomes.count("booked"), capacity)
                 self.assertEqual(outcomes.count("full"), self.WORKERS - capacity)
+
+
+class CsrfAndOutputEncodingTests(TestCase):
+    """BB-55 [SEC-06] / TC-S06: state-changing requests need a CSRF token; stored script input is encoded."""
+
+    PAYLOAD = "<script>alert('xss')</script>"
+    TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "bloodbank"
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Secure Branch", code="SECB")
+        EligibilityRule.objects.create(min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90)
+        self.staff = User.objects.create_user("secstaff@bbms.test", email="secstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.hospital = User.objects.create_user("sechosp@bbms.test", email="sechosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="Secure Hospital"
+        )
+        self.csrf_client = self.client_class(enforce_csrf_checks=True)
+
+    def donor_payload(self, **overrides):
+        data = {
+            "full_name": "Safe Donor", "email": "safe@example.test", "phone": "9000000999",
+            "date_of_birth": "1995-03-03", "weight_kg": "62", "blood_group": "A+", "medical_history": "None",
+            "consent_given": "on", **{f"screening_{key}": "no" for key, _ in SCREENING_QUESTIONS},
+        }
+        data.update(overrides)
+        return data
+
+    def test_csrf_middleware_is_enabled(self):
+        from django.conf import settings
+        self.assertIn("django.middleware.csrf.CsrfViewMiddleware", settings.MIDDLEWARE)
+
+    def test_tc_s06_post_without_token_is_rejected(self):
+        self.csrf_client.force_login(self.staff)
+        response = self.csrf_client.post("/donors/", self.donor_payload())
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Donor.objects.exists())
+
+    def test_tc_s06_login_and_api_without_token_are_rejected(self):
+        response = self.csrf_client.post("/login/", {"email": "secstaff@bbms.test", "password": "pw"})
+        self.assertEqual(response.status_code, 403)
+        self.csrf_client.force_login(self.hospital)
+        response = self.csrf_client.post(
+            "/api/v1/requests", data=json.dumps({"blood_group": "O+"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(BloodRequest.objects.exists())
+
+    def test_post_with_token_is_accepted(self):
+        self.csrf_client.force_login(self.staff)
+        self.csrf_client.get("/donors/")
+        token = self.csrf_client.cookies["csrftoken"].value
+        response = self.csrf_client.post("/donors/", {**self.donor_payload(), "csrfmiddlewaretoken": token})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Donor.objects.count(), 1)
+
+    def test_every_post_form_in_templates_includes_the_token(self):
+        for template in sorted(self.TEMPLATE_DIR.glob("*.html")):
+            html = template.read_text()
+            forms = [f for f in html.lower().split("<form")[1:] if 'method="post"' in f.split(">")[0]]
+            for form in forms:
+                with self.subTest(template=template.name):
+                    self.assertIn("{% csrf_token %}", form.split("</form>")[0])
+
+    def test_autoescaping_is_never_disabled(self):
+        for template in self.TEMPLATE_DIR.glob("*.html"):
+            html = template.read_text()
+            with self.subTest(template=template.name):
+                self.assertNotIn("autoescape off", html)
+                self.assertNotIn("|safe", html)
+        source = (Path(__file__).resolve().parent / "views.py").read_text()
+        self.assertNotIn("mark_safe", source)
+        self.assertNotIn("csrf_exempt", source)
+
+    def test_tc_s06_stored_script_in_donor_name_is_encoded(self):
+        self.client.force_login(self.staff)
+        self.client.post("/donors/", self.donor_payload(full_name=self.PAYLOAD))
+        self.assertEqual(Donor.objects.get().full_name, self.PAYLOAD)
+        for url in ["/donors/", "/deferrals/"]:
+            response = self.client.get(url)
+            with self.subTest(url=url):
+                self.assertNotContains(response, self.PAYLOAD)
+                self.assertContains(response, "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;")
+
+    def test_tc_s06_stored_script_in_request_reference_is_encoded(self):
+        BloodRequest.objects.create(
+            hospital="Secure Hospital", created_by=self.hospital, branch=self.branch, blood_group="O+",
+            component="Packed Red Cells", quantity=1, priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1), clinical_reference=self.PAYLOAD,
+        )
+        self.client.force_login(self.staff)
+        response = self.client.get("/requests/")
+        self.assertNotContains(response, self.PAYLOAD)
+        self.assertContains(response, "&lt;script&gt;")
