@@ -11,7 +11,10 @@ A Django academic implementation of the submitted Blood Bank Management System s
 - Configured mandatory screening panel, release only after all acceptable results, and quarantine for reactive, indeterminate, or incomplete results.
 - Inventory search by group, component, branch, and expiry-aware unit lifecycle.
 - Hospital request creation, request-state history, compatibility-based reservation, cross-match, and atomic issue.
+- In-app account administration at `/accounts/` (System Administrator only): create an account with exactly one role and branch, assign a different role, activate or deactivate. Deactivation ends the account's open sessions immediately, and the last active administrator cannot be deactivated or demoted.
 - Structured audit events, notification delivery records, protected Django administration, CSRF-protected forms, generic authentication failures, rate-limited lockout, and 15-minute session lifetime.
+- Audit events cover authentication (including failed sign-ins and lockouts), account management, configuration changes made through the Django admin, deferrals, screening, inventory, requests and issuance.
+- The failed-login counter and the 15-minute lockout are held in a database-backed cache (`bbms_cache`, created by migration `0007`), so every worker process sees the same attempts.
 
 ## Sprint demos
 

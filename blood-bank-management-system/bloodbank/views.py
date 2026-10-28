@@ -13,16 +13,19 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_http_methods, require_POST
 from .forms import (AppointmentForm, BloodRequestForm, BranchFilterForm, CrossMatchForm, DeferralForm,
-                    DonorForm, DonationForm, LabResultForm)
+                    DonorForm, DonationForm, LabResultForm, UserAccountForm, UserRoleForm)
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
                      Reservation, TestType, UserProfile)
-from .services import (AppointmentError, DuplicateLabResult, audit, book_appointment,
+from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR, LastAdministrator,
+                       account_is_locked, assign_account_role, audit, audit_reference,
+                       book_appointment,
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
-                       check_stock_and_expiry_alerts, discard_unit, eligibility,
-                       expire_units, record_donation, record_lab_result,
+                       check_stock_and_expiry_alerts, clear_login_failures, create_account,
+                       discard_unit, eligibility,
+                       expire_units, record_donation, record_lab_result, record_login_failure,
                        get_branch_warnings, issue_reservation, release_reservation,
-                       release_screened_unit, reserve_units, transition_request)
+                       release_screened_unit, reserve_units, set_account_active, transition_request)
 
 # SEC-01: server-side role sets taken from the SRS 6.3 role-permission matrix (Table 4).
 # Blood bank staff run branch operations; the administrator has oversight (inventory view, reports, audit)
@@ -141,20 +144,22 @@ def login_view(request):
     if request.method == "POST":
         email = request.POST.get("email", "").strip().lower()
         password = request.POST.get("password", "")
-        key = f"login:{email}"
-        locked = cache.get(f"{key}:locked")
-        if locked:
-            messages.error(request, "Invalid email or password.")
+        # SEC-10: every branch below shows GENERIC_LOGIN_ERROR, so a locked, unknown, deactivated
+        # or wrong-password account are indistinguishable from the outside.
+        if account_is_locked(email):
+            audit_reference(
+                None, "LOGIN_BLOCKED", "Authentication", email, outcome="DENIED",
+                summary="Sign-in attempted while the account was locked",
+            )
+            messages.error(request, GENERIC_LOGIN_ERROR)
             return render(request, "bloodbank/login.html")
         user = authenticate(request, username=email, password=password)
         if not user or not hasattr(user, "profile") or not user.profile.active:
-            attempts = int(cache.get(key, 0)) + 1
-            cache.set(key, attempts, 600)
-            if attempts >= 5:
-                cache.set(f"{key}:locked", True, 900)
-            messages.error(request, "Invalid email or password.")
+            # FR-30 / SEC-03: the failure and any resulting lockout are audited by the service.
+            record_login_failure(email)
+            messages.error(request, GENERIC_LOGIN_ERROR)
             return render(request, "bloodbank/login.html")
-        cache.delete(key)
+        clear_login_failures(email)
         login(request, user)
         audit(user, "LOGIN", user, summary="Authenticated session started")
         return redirect("dashboard")
@@ -736,6 +741,85 @@ def audit_view(request):
     elif req_branch:
         events = events.filter(branch_id=req_branch)
     return render(request, "bloodbank/audit.html", {"events": events[:200]})
+
+
+ACCOUNT_ADMIN_DENIAL = "Account administration is restricted to the system administrator"
+
+
+def _accounts_page(request, form):
+    return render(
+        request,
+        "bloodbank/accounts.html",
+        {
+            "form": form,
+            "profiles": UserProfile.objects.select_related("user", "branch").order_by("user__username"),
+            "roles": UserProfile.Role.choices,
+            "branches": Branch.objects.order_by("name"),
+        },
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def account_admin(request):
+    """FR-26: the administrator's own screen for user accounts, instead of the Django admin."""
+    if not allowed(request.user, ADMIN):
+        return deny(request.user, ACCOUNT_ADMIN_DENIAL)
+    form = UserAccountForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        profile = create_account(
+            request.user,
+            form.cleaned_data["email"],
+            form.cleaned_data["full_name"],
+            form.cleaned_data["role"],
+            form.cleaned_data["branch"],
+            form.cleaned_data["password"],
+            form.cleaned_data["hospital_name"],
+        )
+        messages.success(request, f"Account {profile.user.username} created as {profile.get_role_display()}.")
+        return redirect("accounts")
+    return _accounts_page(request, form)
+
+
+@login_required
+@require_POST
+def account_status(request, pk):
+    """FR-26: deactivation blocks the next sign-in and ends the sessions already open."""
+    if not allowed(request.user, ADMIN):
+        return deny(request.user, ACCOUNT_ADMIN_DENIAL)
+    profile = get_object_or_404(UserProfile, pk=pk)
+    activate = request.POST.get("active") == "1"
+    try:
+        set_account_active(profile, activate, request.user)
+    except LastAdministrator as error:
+        messages.error(request, str(error))
+        return redirect("accounts")
+    messages.success(
+        request,
+        f"{profile.user.username} {'activated' if activate else 'deactivated and signed out'}.",
+    )
+    return redirect("accounts")
+
+
+@login_required
+@require_POST
+def account_role(request, pk):
+    """FR-26: assign exactly one role, and the branch that role works in."""
+    if not allowed(request.user, ADMIN):
+        return deny(request.user, ACCOUNT_ADMIN_DENIAL)
+    profile = get_object_or_404(UserProfile, pk=pk)
+    form = UserRoleForm(request.POST)
+    if not form.is_valid():
+        for error in form.errors.values():
+            messages.error(request, error.as_text())
+        return redirect("accounts")
+    try:
+        assign_account_role(profile, form.cleaned_data["role"], form.cleaned_data["branch"], request.user)
+    except LastAdministrator as error:
+        messages.error(request, str(error))
+        return redirect("accounts")
+    messages.success(request, f"{profile.user.username} is now {profile.get_role_display()}.")
+    return redirect("accounts")
 
 
 @login_required

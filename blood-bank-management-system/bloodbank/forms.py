@@ -1,14 +1,19 @@
 import re
 
 from django import forms
+from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from .models import (BLOOD_GROUPS, COMPONENT_CODES, DonationType, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
-                     LabResult, Reservation)
+                     LabResult, Reservation, UserProfile)
 
 
 PHONE_PATTERN = re.compile(r"^\+?\d{10,15}$")
 YES_NO = [("no", "No"), ("yes", "Yes")]
+# FR-26 / NFR-09: operational roles work inside one branch, so a branch is mandatory for them.
+BRANCH_SCOPED_ROLES = {UserProfile.Role.STAFF, UserProfile.Role.HOSPITAL}
 
 
 class DonorForm(forms.ModelForm):
@@ -240,4 +245,68 @@ class DonationForm(forms.Form):
         if not components:
             raise forms.ValidationError("Enter a volume for at least one component unit.")
         cleaned["components"] = components
+        return cleaned
+
+
+def validate_role_branch(form, cleaned):
+    """FR-26 / NFR-09: an operational role is always scoped to exactly one branch."""
+    if cleaned.get("role") in BRANCH_SCOPED_ROLES and cleaned.get("branch") is None:
+        form.add_error("branch", "Blood bank staff and hospital staff must belong to one branch.")
+
+
+class UserAccountForm(forms.Form):
+    """FR-26: the administrator creates an account with exactly one role and one branch."""
+
+    full_name = forms.CharField(max_length=120, label="Full name")
+    email = forms.EmailField(label="Email address (used to sign in)")
+    role = forms.ChoiceField(choices=UserProfile.Role.choices, label="Role (exactly one)")
+    branch = forms.ModelChoiceField(
+        queryset=Branch.objects.order_by("name"), required=False,
+        empty_label="No branch (donor or administrator)",
+    )
+    hospital_name = forms.CharField(max_length=120, required=False, label="Hospital (hospital staff only)")
+    password = forms.CharField(
+        widget=forms.PasswordInput, label="Initial password",
+        help_text="Stored only as an adaptive hash. It is never written to the audit trail.",
+    )
+
+    def clean_full_name(self):
+        name = (self.cleaned_data.get("full_name") or "").strip()
+        if len(name) < 2:
+            raise forms.ValidationError("Enter the account holder's full name.")
+        return name
+
+    def clean_email(self):
+        email = (self.cleaned_data.get("email") or "").strip().lower()
+        if User.objects.filter(username__iexact=email).exists():
+            raise forms.ValidationError("An account already uses this email address.")
+        return email
+
+    def clean_password(self):
+        # SEC-02: the password is checked against the configured AUTH_PASSWORD_VALIDATORS before
+        # it is hashed, and the cleaned value is passed straight to create_user.
+        password = self.cleaned_data.get("password") or ""
+        try:
+            validate_password(password)
+        except ValidationError as error:
+            raise forms.ValidationError(error.messages)
+        return password
+
+    def clean(self):
+        cleaned = super().clean()
+        validate_role_branch(self, cleaned)
+        if cleaned.get("role") == UserProfile.Role.HOSPITAL and not (cleaned.get("hospital_name") or "").strip():
+            self.add_error("hospital_name", "Name the hospital this account belongs to.")
+        return cleaned
+
+
+class UserRoleForm(forms.Form):
+    """FR-26: move an existing account to exactly one other role, and to the branch it works in."""
+
+    role = forms.ChoiceField(choices=UserProfile.Role.choices)
+    branch = forms.ModelChoiceField(queryset=Branch.objects.order_by("name"), required=False)
+
+    def clean(self):
+        cleaned = super().clean()
+        validate_role_branch(self, cleaned)
         return cleaned
