@@ -15,6 +15,10 @@ A Django academic implementation of the submitted Blood Bank Management System s
 - Structured audit events, notification delivery records, protected Django administration, CSRF-protected forms, generic authentication failures, rate-limited lockout, and 15-minute session lifetime.
 - Audit events cover authentication (including failed sign-ins and lockouts), account management, configuration changes made through the Django admin, deferrals, screening, inventory, requests and issuance.
 - The failed-login counter and the 15-minute lockout are held in a database-backed cache (`bbms_cache`, created by migration `0007`), so every worker process sees the same attempts.
+- In-app configuration at `/configuration/` (System Administrator only): branch thresholds and time zone, the donor eligibility rule, component shelf lives and appointment slots, each validated (maximum age above minimum, capacity and intervals at least one) and audited.
+- Five reports at `/reports/` — inventory, expiry, donations, blood requests and audit trail — filtered by date range and branch and downloadable as CSV. A hospital account sees only availability and its own requests; asking for another report by name is denied and audited.
+- `GET /health/` is unauthenticated and returns `200` while the application and database are up, `503` otherwise. It is what the `web` container healthcheck and the uptime monitor poll (`NFR-03`).
+- `scripts/backup.sh` and `scripts/restore.sh` take encrypted `pg_dump` backups (7 daily, 4 weekly) and restore one with timing. See [`docs/operations.md`](../docs/operations.md).
 
 ## Sprint demos
 

@@ -3,6 +3,8 @@ from . import views
 
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
+    # NFR-03: unauthenticated liveness probe for the load balancer and uptime monitor.
+    path("health/", views.health, name="health"),
     path("login/", views.login_view, name="login"),
     path("logout/", views.logout_view, name="logout"),
     path("donors/", views.donor_list, name="donors"),
@@ -28,6 +30,9 @@ urlpatterns = [
     path("accounts/", views.account_admin, name="accounts"),
     path("accounts/<int:pk>/status/", views.account_status, name="account_status"),
     path("accounts/<int:pk>/role/", views.account_role, name="account_role"),
+    # FR-27: in-app configuration for branches, slots, eligibility and shelf-life rules.
+    path("configuration/", views.configuration, name="configuration"),
+    path("configuration/<str:section>/", views.configuration_save, name="configuration_save"),
     path("reports/", views.reports, name="reports"),
     # SADS Section 8.2 REST API endpoints for Inventory & Request Service (FR-17 to FR-24)
     path("api/v1/inventory", views.api_inventory, name="api_inventory_noslash"),

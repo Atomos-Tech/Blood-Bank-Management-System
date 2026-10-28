@@ -1,3 +1,4 @@
+import csv
 import json
 import uuid
 from django.contrib import messages
@@ -5,21 +6,23 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.core.paginator import Paginator
-from django.db import IntegrityError, transaction
-from django.db.models import Q
-from django.http import HttpResponseForbidden, JsonResponse
+from django.db import IntegrityError, connection, transaction
+from django.db.models import Count, Q
+from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_http_methods, require_POST
-from .forms import (AppointmentForm, BloodRequestForm, BranchFilterForm, CrossMatchForm, DeferralForm,
-                    DonorForm, DonationForm, LabResultForm, UserAccountForm, UserRoleForm)
+from .forms import (AppointmentForm, AppointmentSlotForm, BloodRequestForm, BranchConfigForm,
+                    BranchFilterForm, CrossMatchForm, DeferralForm,
+                    DonorForm, DonationForm, EligibilityRuleForm, LabResultForm, ReportFilterForm,
+                    ShelfLifeRuleForm, UserAccountForm, UserRoleForm)
 from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
-                     CrossMatch, Deferral, Donation, Donor, Issue, LabResult, Notification,
-                     Reservation, TestType, UserProfile)
+                     CrossMatch, Deferral, Donation, Donor, EligibilityRule, Issue, LabResult,
+                     Notification, Reservation, ShelfLifeRule, TestType, UserProfile)
 from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR, LastAdministrator,
-                       account_is_locked, assign_account_role, audit, audit_reference,
-                       book_appointment,
+                       account_is_locked, active_eligibility_rule, assign_account_role, audit,
+                       audit_reference, book_appointment,
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
                        check_stock_and_expiry_alerts, clear_login_failures, create_account,
                        discard_unit, eligibility,
@@ -135,6 +138,22 @@ def _filter_units_by_search(qs, params):
             if parsed_d is not None:
                 qs = qs.filter(expiry_at__date__lte=parsed_d)
     return qs
+
+
+@require_http_methods(["GET"])
+def health(request):
+    """NFR-03: 200 only while the application is serving and the database answers.
+
+    Unauthenticated on purpose: a load balancer or uptime monitor has no session, and the
+    body carries no data about the blood bank itself.
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        return JsonResponse({"status": "unavailable", "database": "down"}, status=503)
+    return JsonResponse({"status": "ok", "database": "up"})
 
 
 @require_http_methods(["GET", "POST"])
@@ -822,8 +841,185 @@ def account_role(request, pk):
     return redirect("accounts")
 
 
+CONFIG_DENIAL = "Configuration is restricted to the system administrator"
+
+# FR-27: each configuration section, its form and the audit record type it writes.
+CONFIG_SECTIONS = {
+    "branch": (BranchConfigForm, Branch),
+    "eligibility": (EligibilityRuleForm, EligibilityRule),
+    "shelf-life": (ShelfLifeRuleForm, ShelfLifeRule),
+    "slot": (AppointmentSlotForm, AppointmentSlot),
+}
+
+
+def _configuration_page(request, invalid=None):
+    """Render every configuration section. `invalid` is the one bound form that failed, if any,
+    keyed by (section, pk) so it is shown in place with its errors."""
+    invalid = invalid or {}
+
+    def form_for(section, pk, form_class, instance, prefix):
+        return invalid.get((section, pk)) or form_class(instance=instance, prefix=prefix)
+
+    rule = active_eligibility_rule()
+    return render(
+        request,
+        "bloodbank/configuration.html",
+        {
+            "branch_forms": [
+                (b, form_for("branch", b.pk, BranchConfigForm, b, f"branch-{b.pk}"))
+                for b in Branch.objects.order_by("name")
+            ],
+            "eligibility_form": form_for(
+                "eligibility", getattr(rule, "pk", None), EligibilityRuleForm, rule, None,
+            ),
+            "shelf_life_forms": [
+                (r, form_for("shelf-life", r.pk, ShelfLifeRuleForm, r, f"shelf-{r.pk}"))
+                for r in ShelfLifeRule.objects.order_by("component")
+            ],
+            "slot_form": invalid.get(("slot", None)) or AppointmentSlotForm(),
+            "slots": AppointmentSlot.objects.select_related("branch").filter(
+                starts_at__gt=timezone.now()
+            ).order_by("starts_at")[:20],
+        },
+    )
+
+
 @login_required
+@require_http_methods(["GET"])
+def configuration(request):
+    """FR-27: branches, slot capacities, eligibility rules, shelf lives and stock thresholds."""
+    if not allowed(request.user, ADMIN):
+        return deny(request.user, CONFIG_DENIAL)
+    return _configuration_page(request)
+
+
+@login_required
+@require_POST
+def configuration_save(request, section):
+    """FR-27 / FR-30: validate one configuration section and audit the change."""
+    if not allowed(request.user, ADMIN):
+        return deny(request.user, CONFIG_DENIAL)
+    if section not in CONFIG_SECTIONS:
+        return deny(request.user, f"Unknown configuration section {section}")
+    form_class, _model = CONFIG_SECTIONS[section]
+
+    instance, prefix = None, None
+    pk = request.POST.get("pk")
+    if section == "branch":
+        instance = get_object_or_404(Branch, pk=pk)
+        prefix = f"branch-{instance.pk}"
+    elif section == "shelf-life":
+        instance = get_object_or_404(ShelfLifeRule, pk=pk)
+        prefix = f"shelf-{instance.pk}"
+    elif section == "eligibility":
+        instance = active_eligibility_rule()
+
+    form = form_class(request.POST, instance=instance, prefix=prefix) if instance is not None \
+        else form_class(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Configuration not saved: fix the errors shown.")
+        return _configuration_page(request, {(section, getattr(instance, "pk", None)): form})
+
+    changed = ", ".join(form.changed_data) or "no fields"
+    record = form.save()
+    audit(
+        request.user,
+        "CONFIGURATION_CHANGED" if instance is not None else "CONFIGURATION_CREATED",
+        record,
+        summary=f"{record._meta.verbose_name} {record}: {changed}",
+    )
+    messages.success(request, f"{record._meta.verbose_name.capitalize()} saved.")
+    return redirect("configuration")
+
+
+# FR-28: the five report types, each with its columns and the field its date range filters on.
+REPORT_DEFINITIONS = {
+    "inventory": ("Inventory", ["Unit", "Blood group", "Component", "Status", "Branch", "Collected", "Expires"]),
+    "expiry": ("Expiry", ["Unit", "Blood group", "Component", "Branch", "Expires", "Status"]),
+    "donation": ("Donations", ["Donation", "Donor", "Blood group", "Type", "Branch", "Collected", "Units"]),
+    "request": ("Blood requests", ["Request", "Hospital", "Blood group", "Component", "Quantity",
+                                   "Priority", "Status", "Required by", "Raised"]),
+    "audit": ("Audit trail", ["Time (UTC)", "Actor", "Event", "Record", "Outcome", "Summary"]),
+}
+# NFR-11 / SEC-09: a hospital account sees availability and its own requests, never donor,
+# donation or audit records.
+HOSPITAL_REPORTS = ["inventory", "request"]
+
+
+def _in_range(queryset, field, start, end):
+    if start:
+        queryset = queryset.filter(**{f"{field}__date__gte": start})
+    if end:
+        queryset = queryset.filter(**{f"{field}__date__lte": end})
+    return queryset
+
+
+def _report_rows(report, user, start, end, branch):
+    """Return the rows of one report, already scoped to the viewer's role and branch."""
+    is_hospital = role(user) == UserProfile.Role.HOSPITAL
+    local = timezone.localtime
+
+    if report in {"inventory", "expiry"}:
+        units = BloodUnit.objects.select_related("branch", "donation")
+        if branch:
+            units = units.filter(branch=branch)
+        if is_hospital:
+            units = units.filter(status=BloodUnit.Status.AVAILABLE, expiry_at__gt=timezone.now())
+        if report == "expiry":
+            units = _in_range(units, "expiry_at", start, end).order_by("expiry_at", "id")
+            return [
+                [u.unit_id, u.blood_group, u.component, u.branch.code,
+                 local(u.expiry_at).strftime("%Y-%m-%d %H:%M"), u.get_status_display()]
+                for u in units
+            ]
+        units = _in_range(units, "donation__collected_at", start, end).order_by("expiry_at", "id")
+        return [
+            [u.unit_id, u.blood_group, u.component, u.get_status_display(), u.branch.code,
+             local(u.donation.collected_at).strftime("%Y-%m-%d %H:%M"),
+             local(u.expiry_at).strftime("%Y-%m-%d %H:%M")]
+            for u in units
+        ]
+
+    if report == "donation":
+        donations = Donation.objects.select_related("donor", "branch").annotate(unit_count=Count("units"))
+        if branch:
+            donations = donations.filter(branch=branch)
+        donations = _in_range(donations, "collected_at", start, end).order_by("-collected_at")
+        return [
+            [d.donation_id, d.donor.full_name, d.donor.blood_group, d.get_donation_type_display(),
+             d.branch.code, local(d.collected_at).strftime("%Y-%m-%d %H:%M"), d.unit_count]
+            for d in donations
+        ]
+
+    if report == "request":
+        requests_qs = BloodRequest.objects.select_related("branch")
+        if branch:
+            requests_qs = requests_qs.filter(branch=branch)
+        if is_hospital:
+            requests_qs = requests_qs.filter(created_by=user)
+        requests_qs = _in_range(requests_qs, "created_at", start, end).order_by("-created_at")
+        return [
+            [r.pk, r.hospital, r.blood_group, r.component, r.quantity, r.priority,
+             r.get_status_display(), local(r.required_by).strftime("%Y-%m-%d %H:%M"),
+             local(r.created_at).strftime("%Y-%m-%d %H:%M")]
+            for r in requests_qs
+        ]
+
+    events = AuditEvent.objects.select_related("actor", "branch")
+    if branch:
+        events = events.filter(branch=branch)
+    events = _in_range(events, "created_at", start, end)
+    return [
+        [e.created_at.strftime("%Y-%m-%d %H:%M:%S"), str(e.actor or "System"), e.event_type,
+         f"{e.record_type} {e.record_id}", e.outcome, e.summary]
+        for e in events[:2000]
+    ]
+
+
+@login_required
+@require_http_methods(["GET"])
 def reports(request):
+    """FR-28: five report types, filtered by date range and branch, downloadable as CSV."""
     if not allowed(request.user, STOCK_VIEWERS):
         return deny(request.user)
     expire_units()
@@ -832,44 +1028,57 @@ def reports(request):
     if req_branch and not in_branch_scope(request.user, req_branch):
         return deny(request.user, "Cross-branch report access denied")
 
-    units = BloodUnit.objects.select_related("branch").all()
-    requests_qs = BloodRequest.objects.select_related("branch").all()
-    donations = Donation.objects.select_related("branch").all()
-    audits = AuditEvent.objects.all()
+    is_hospital = role(request.user) == UserProfile.Role.HOSPITAL
+    available = HOSPITAL_REPORTS if is_hospital else list(REPORT_DEFINITIONS)
 
-    if ub:
-        units = units.filter(branch=ub)
-        requests_qs = requests_qs.filter(branch=ub)
-        donations = donations.filter(branch=ub)
-        audits = audits.filter(branch=ub)
-    elif req_branch:
-        units = units.filter(branch_id=req_branch)
-        requests_qs = requests_qs.filter(branch_id=req_branch)
-        donations = donations.filter(branch_id=req_branch)
-        audits = audits.filter(branch_id=req_branch)
+    # A role asking by name for a report it may not see is denied and audited, rather than
+    # quietly shown a different one (NFR-11 / SEC-09).
+    requested = (request.GET.get("report") or "").strip()
+    if requested and requested not in available:
+        if requested in REPORT_DEFINITIONS:
+            return deny(request.user, f"The {requested} report is not available to this role")
+        requested = ""
 
-    if role(request.user) == UserProfile.Role.HOSPITAL:
-        avail_units = units.filter(status=BloodUnit.Status.AVAILABLE, expiry_at__gt=timezone.now()).order_by("expiry_at", "id")
-        own_requests = requests_qs.filter(created_by=request.user).order_by("-created_at")
-        return render(
-            request,
-            "bloodbank/reports.html",
-            {
-                "is_hospital": True,
-                "units": avail_units,
-                "requests": own_requests,
-            },
+    form = ReportFilterForm(
+        request.GET or None,
+        allowed_reports=HOSPITAL_REPORTS if is_hospital else None,
+        lock_branch=ub,
+    )
+    form.is_valid()  # a blank or partly filled filter falls back to the defaults below
+    cleaned = form.cleaned_data if hasattr(form, "cleaned_data") else {}
+
+    report = requested or available[0]
+    start, end = cleaned.get("start_date"), cleaned.get("end_date")
+    branch = ub or cleaned.get("branch")
+
+    title, columns = REPORT_DEFINITIONS[report]
+    rows = _report_rows(report, request.user, start, end, branch)
+
+    if request.GET.get("format") == "csv":
+        audit_reference(
+            request.user, "REPORT_EXPORTED", "Report", report,
+            summary=f"{title} report exported as CSV ({len(rows)} rows)",
+            branch=branch,
         )
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="bbms-{report}-report.csv"'
+        writer = csv.writer(response)
+        writer.writerow(columns)
+        writer.writerows(rows)
+        return response
 
     return render(
         request,
         "bloodbank/reports.html",
         {
-            "is_hospital": False,
-            "units": units.order_by("expiry_at", "id"),
-            "requests": requests_qs.order_by("-created_at"),
-            "donations": donations.order_by("-collected_at"),
-            "audit_count": audits.count(),
+            "form": form,
+            "is_hospital": is_hospital,
+            "report": report,
+            "report_title": title,
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "csv_query": request.GET.urlencode(),
         },
     )
 
