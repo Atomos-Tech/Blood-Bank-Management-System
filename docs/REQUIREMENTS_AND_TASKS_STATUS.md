@@ -1,110 +1,97 @@
-# Blood Bank Management System — Requirements & Tasks Completion Status Report
+# Blood Bank Management System — Requirements & Tasks Status
 
-**Prepared for:** Nimay Ballal (`PES1UG24CS301`, GitHub: `@Atomos-Tech`)  
 **Course:** `UE24CS341A` – Software Engineering  
-**Baseline Documents Audited:**
-1. `1_Software_Requirements_Specification.pdf` (`BBMS SRS 1.0`)
-2. `2_Software_Test_Plan.pdf` (`BBMS STP 1.0`)
-3. `3_Software_Architecture_and_Design_Specification.docx.pdf` (`BBMS SADS 1.0`)
-4. `Project_Documents/Blood_Bank_Management_System_Part_1_Submission.pdf`
+**Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
+**Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
----
+**Backlog:** 51 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
-## 1. Status of All 14 Tasks Assigned to Nimay Ballal (`@Atomos-Tech`)
+## Still open
 
-All **14 issues (39 Story Points)** assigned to Nimay Ballal (`@Atomos-Tech`) have been **100% implemented, verified against every acceptance criterion, and tested** in the codebase (`blood-bank-management-system/`).
+- `BB-53` (#55) Expire idle sessions and invalidate on logout or deactivation — Nikita
+- `BB-49` (#51) Configurable record retention and export — Nikita
+- `BB-44` (#46) First-time staff finish donor lookup and check-in in 5 minutes — Nikita
+- `BB-43` (#45) Works on current browsers from 360 to 1440 px — Nikita
+- `BB-36` (#38) Send appointment reminders and request-status emails — Nikita
+- `BB-14` (#16) Show donor donation history, appointments and eligibility date — Nikita
+- `BB-06` (#8) Complete documentation and the deviations log — Niyatee
+- `BB-05` (#7) Record and upload the 2-minute Sprint 2 demo video — Niyatee, Nishitha, Nikita
 
-| Issue # | Backlog Key | SRS ID | Sprint | Story Points | Title | Codebase Status | Verification Evidence |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **#26** | `BB-24` | `FR-17` | Sprint 1 | 3 | Search available stock by group, component, branch and expiry | **COMPLETE** | `views.inventory`, `views.api_inventory`, `inventory.html` (`expires_before` filter, hospital `AVAILABLE` restriction, soonest-expiry sorting); verified by `InventorySearchTests.test_tc_f09_filters_and_soonest_expiry_sorting` (`TC-F09`). |
-| **#27** | `BB-25` | `FR-18` | Sprint 2 | 5 | Alert staff on low stock and near-expiry units | **COMPLETE** | `services.get_branch_warnings`, `services.check_stock_and_expiry_alerts`, management command `check_alerts`, and active warning banner in `dashboard.html`; verified by `LowStockAndNearExpiryAlertTests.test_tc_f10_scheduled_alerts_are_idempotent_and_shown_on_dashboard` (`TC-F10`). |
-| **#28** | `BB-26` | `FR-19` | Sprint 0 | 2 | Hospital staff create a blood request | **COMPLETE** | `forms.BloodRequestForm` (`clean_quantity >= 1`, `clean_required_by > now`), `views.request_list` (`PENDING` initial status, hospital assignment); verified by `BloodRequestWorkflowTests.test_tc_f11_hospital_creates_request_and_validates_fields` (`TC-F11`). |
-| **#29** | `BB-27` | `FR-20` | Sprint 1 | 2 | Track request states and record every transition | **COMPLETE** | `services.transition_request`, `models.RequestTransition`, and transition history rendered in `requests.html`; verified by `BloodRequestWorkflowTests.test_tc_f11_request_state_transitions_and_history_in_ui` (`TC-F11`). |
-| **#30** | `BB-28` | `FR-21` | Sprint 1 | 2 | Restrict request cancellation by role and state | **COMPLETE** | `views.request_action` & `services.transition_request` (hospital cancels only own `PENDING` requests; staff cancels `APPROVED`/`PARTIAL` and releases reserved units); verified by `BloodRequestWorkflowTests.test_tc_f12_request_cancellation_permissions_by_role_and_state` (`TC-F12`). |
-| **#31** | `BB-29` | `FR-22` | Sprint 1 | 3 | Reserve compatible units without double assignment | **COMPLETE** | `models.Reservation` (`ForeignKey` + conditional `UniqueConstraint` `unique_active_reservation_per_unit`), `services.reserve_units` (soonest expiry first), `services.release_reservation` (allows re-reservation after release); verified by `ReservationCrossMatchAndAtomicIssueTests.test_tc_f13_soonest_expiry_single_active_reservation_and_re_reservation_after_release` (`TC-F13`). |
-| **#32** | `BB-30` | `FR-23` | Sprint 1 | 1 | Require a cross-match before issuing a reserved unit | **COMPLETE** | `models.CrossMatch`, `views.crossmatch_view`, `services.issue_reservation`; verified by `WorkflowTests.test_reservation_and_issue_requires_crossmatch` and `ReservationCrossMatchAndAtomicIssueTests` (`TC-F13`). |
-| **#33** | `BB-31` | `FR-24` | Sprint 1 | 2 | Issue unit and update request in one transaction | **COMPLETE** | `@transaction.atomic` on `services.issue_reservation` and `services.transition_request`; rollback verified by `ReservationCrossMatchAndAtomicIssueTests.test_tc_f13_incompatible_crossmatch_blocks_issue_and_failure_rolls_back_atomically` (`TC-F13`). |
-| **#40** | `BB-38` | `NFR-01` | Sprint 2 | 5 | Search and dashboard respond within 3 s for 100 users | **COMPLETE** | DB composite indexes (`unit_search_idx`, `unit_branch_expiry_idx`, `req_branch_status_idx`), pagination, WAL mode, `locustfile.py`, and `scripts/run_load_and_concurrency_benchmark.py`. Measured with 5,000 donors, 10,000 units, 100 concurrent users: **p95 = `1,665.0 ms` (`1.665 s`, `99.67% <= 3 s`)**, saved in `docs/test-results/TC-N01_NFR-01_load_test_results.md` (`TC-N01`). |
-| **#41** | `BB-39` | `NFR-02` | Sprint 2 | 3 | Reservation completes within 5 s with no duplicates under load | **COMPLETE** | `select_for_update()` + `unique_active_reservation_per_unit` constraint + concurrency benchmark in `scripts/run_load_and_concurrency_benchmark.py`. Measured: **max = `194.45 ms` (`< 5 s`), `0` duplicate unit assignments**, saved in `docs/test-results/TC-N02_NFR-02_reservation_concurrency_results.md` (`TC-N02`). |
-| **#48** | `BB-46` | `NFR-09` | Sprint 2 | 5 | Branch-level access restrictions for operational users | **COMPLETE** | `views.user_branch`, `views.in_branch_scope`, `Donor.branch` field; filters donors, deferrals, inventory, API, requests, reports, and audit by branch for operational users (`STAFF`/`HOSPITAL`) while `ADMIN` sees all branches; cross-branch access returns HTTP 403 and logs `UNAUTHORIZED_ACCESS`; verified by `BranchAccessRestrictionTests.test_tc_s02_branch_isolation_and_cross_branch_denial` (`TC-S02`). |
-| **#50** | `BB-48` | `NFR-11` | Sprint 1 | 2 | Hide medical and screening data from search and hospital reports | **COMPLETE** | `views.inventory`, `views.api_inventory`, `views.reports`, `inventory.html`, `reports.html`; verified by `PrivacyAndMinimumDataPerRoleTests.test_tc_s04_hospital_search_api_dashboard_and_reports_hide_donor_and_medical_data` (`TC-S04`). |
-| **#56** | `BB-54` | `SEC-05` | Sprint 2 | 2 | HTTPS only in production | **COMPLETE** | `nginx.conf` (port 80 -> 443 301 redirect, port 443 TLS 1.2/1.3, HSTS header), `docker-compose.yml` (`BBMS_SECURE_SSL: "1"`, port `443:443`), `bbms/settings.py`; verified by `ProductionHTTPSConfigurationTests.test_sec_05_nginx_compose_and_settings_enforce_https_and_hsts`. |
-| **#60** | `BB-58` | `SEC-09` | Sprint 1 | 2 | Show only the minimum donor and patient data per role | **COMPLETE** | Role-by-page data scoping in `dashboard.html`, `inventory.html`, `requests.html`, `reports.html`, `my_donor.html`; verified by `PrivacyAndMinimumDataPerRoleTests` (`TC-S04`). |
+## Functional requirements
 
----
+| Requirement | Backlog item | Issue | Owner | Sprint | Status | Test case |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| FR-01 | Register donor with validated mandatory fields | `BB-08` (#10) | Nikita | Sprint 1 | Complete | TC-F01 |
+| FR-02 | Reject duplicate active donor profile by email | `BB-09` (#11) | Nikita | Sprint 0 (dry run) | Complete | TC-F01 |
+| FR-03 | Evaluate eligibility from administrator-configured rules | `BB-10` (#12) | Nikita | Sprint 1 | Complete | TC-F02 |
+| FR-04 | Show every failed eligibility rule and block confirmation | `BB-11` (#13) | Nikita | Sprint 1 | Complete | TC-F02 |
+| FR-05 | Create, reschedule and cancel an appointment | `BB-12` (#14) | Nikita | Sprint 1 | Complete | TC-F03 |
+| FR-06 | Prevent slot capacity from being exceeded | `BB-13` (#15) | Nikita | Sprint 1 | Complete | TC-F03 |
+| FR-07 | Show donor donation history, appointments and eligibility date | `BB-14` (#16) | Nikita | Sprint 2 | **Open** | TC-F04 |
+| FR-08 | Record temporary or permanent donor deferrals | `BB-15` (#17) | Nikita | Sprint 1 | Complete | TC-F05 |
+| FR-09 | Assign unique donation and blood unit identifiers | `BB-16` (#18) | Niyatee | Sprint 1 | Complete | TC-F06 |
+| FR-10 | Record collection details for each blood unit | `BB-17` (#19) | Niyatee | Sprint 0 (dry run) | Complete | TC-F06 |
+| FR-11 | Store results for the mandatory infection test panel | `BB-18` (#20) | Niyatee | Sprint 1 | Complete | TC-F07 |
+| FR-12 | Release unit to Available only after all tests are acceptable | `BB-19` (#21) | Niyatee | Sprint 1 | Complete | TC-F07 |
+| FR-13 | Quarantine units with reactive, indeterminate or incomplete results | `BB-20` (#22) | Niyatee | Sprint 1 | Complete | TC-F07 |
+| FR-14 | Enforce valid blood unit state transitions | `BB-21` (#23) | Niyatee | Sprint 1 | Complete | TC-F08 |
+| FR-15 | Calculate expiry from collection time and shelf-life rule | `BB-22` (#24) | Niyatee | Sprint 1 | Complete | TC-F08 |
+| FR-16 | Automatically mark unissued units Expired | `BB-23` (#25) | Niyatee | Sprint 2 | Complete | TC-F08 |
+| FR-17 | Search available stock by group, component, branch and expiry | `BB-24` (#26) | Nimay | Sprint 1 | Complete | TC-F09 |
+| FR-18 | Alert staff on low stock and near-expiry units | `BB-25` (#27) | Nimay | Sprint 2 | Complete | TC-F10 |
+| FR-19 | Hospital staff create a blood request | `BB-26` (#28) | Nimay | Sprint 0 (dry run) | Complete | TC-F11 |
+| FR-20 | Track request states and record every transition | `BB-27` (#29) | Nimay | Sprint 1 | Complete | TC-F11 |
+| FR-21 | Restrict request cancellation by role and state | `BB-28` (#30) | Nimay | Sprint 1 | Complete | TC-F12 |
+| FR-22 | Reserve compatible units without double assignment | `BB-29` (#31) | Nimay | Sprint 1 | Complete | TC-F13 |
+| FR-23 | Require a cross-match before issuing a reserved unit | `BB-30` (#32) | Nimay | Sprint 1 | Complete | TC-F13 |
+| FR-24 | Issue unit and update request in one transaction | `BB-31` (#33) | Nimay | Sprint 1 | Complete | TC-F13 |
+| FR-25 | Authenticate all four roles before protected functions | `BB-32` (#34) | Nishitha | Sprint 1 | Complete | TC-S01 |
+| FR-26 | Administrator manages user accounts and roles | `BB-33` (#35) | Nishitha | Sprint 1 | Complete | TC-S02 |
+| FR-27 | Administrator configures branches, slots, rules and thresholds | `BB-34` (#36) | Nishitha | Sprint 2 | Complete | TC-F14 |
+| FR-28 | Generate reports by date range and branch | `BB-35` (#37) | Nishitha | Sprint 2 | Complete | TC-F15 |
+| FR-29 | Send appointment reminders and request-status emails | `BB-36` (#38) | Nikita | Sprint 2 | **Open** | TC-F16 |
+| FR-30 | Write audit events for all security-relevant actions | `BB-37` (#39) | Nishitha | Sprint 1 | Complete | TC-S03 |
 
-## 2. Full Project Requirements Audit (What Is Complete vs. Yet to Be Completed by Other Team Members)
+## Non-functional requirements
 
-Below is the brutally honest status of **every requirement** in the SRS (`FR-01` to `FR-30`, `NFR-01` to `NFR-12`, `SEC-01` to `SEC-10`) and Software Architecture & Design Specification (`SADS`) across the entire project.
+| Requirement | Backlog item | Issue | Owner | Sprint | Status | Test case |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| NFR-01 | Search and dashboard respond within 3 s for 100 users | `BB-38` (#40) | Nimay | Sprint 2 | Complete | TC-N01 |
+| NFR-02 | Reservation completes within 5 s with no duplicates under load | `BB-39` (#41) | Nimay | Sprint 2 | Complete | TC-N02 |
+| NFR-03 | Support 99.0 percent monthly availability | `BB-40` (#42) | Nishitha | Sprint 2 | Complete | TC-N03 |
+| NFR-04 | Daily encrypted backups with tested restore | `BB-41` (#43) | Nishitha | Sprint 2 | Complete | TC-N03 |
+| NFR-05 | Committed data survives an application restart | `BB-42` (#44) | Nishitha | Sprint 1 | Complete | TC-N04 |
+| NFR-06 | Works on current browsers from 360 to 1440 px | `BB-43` (#45) | Nikita | Sprint 2 | **Open** | TC-N05 |
+| NFR-07 | First-time staff finish donor lookup and check-in in 5 minutes | `BB-44` (#46) | Nikita | Sprint 2 | **Open** | TC-N06 |
+| NFR-08 | Layered modules with unit tests for state rules | `BB-45` (#47) | Niyatee | Sprint 2 | Complete | Code review + unit tests |
+| NFR-09 | Branch-level access restrictions for operational users | `BB-46` (#48) | Nimay | Sprint 2 | Complete | TC-S02 |
+| NFR-10 | Store UTC and display branch local time | `BB-47` (#49) | Niyatee | Sprint 2 | Complete | TC-N07 |
+| NFR-11 | Hide medical and screening data from search and hospital reports | `BB-48` (#50) | Nimay | Sprint 1 | Complete | TC-S04 |
+| NFR-12 | Configurable record retention and export | `BB-49` (#51) | Nikita | Sprint 2 | **Open** | Configuration inspection |
 
-### 2.1 Functional Requirements (`FR-01` to `FR-30`)
+## Security requirements
 
-| Requirement ID | Description | Status | Honest Assessment & Remaining Gaps (Assigned to Other Team Members) |
-| :--- | :--- | :--- | :--- |
-| **FR-01** | Register donor after validating mandatory identity, contact, consent, and medical history fields | **Partial** | `Donor` model and `DonorForm` exist at `/donors/` (for Staff/Admin), **but**: (1) `DonorForm` does not reject `consent_given=False` on registration; (2) there is no public self-registration form for donors (`POST /api/v1/donors` in SADS). |
-| **FR-02** | Maintain one donor profile per email address; reject duplicate active profile | **Complete** | `Donor.email` has `unique=True` enforced at form and database level. |
-| **FR-03** | Evaluate donor eligibility using admin-configured rules (age, weight, donation type, interval, deferrals, screening responses) | **Partial** | `services.eligibility(donor)` evaluates `min_age`, `max_age`, `min_weight_kg`, `minimum_interval_days`, `consent_given`, and active `Deferral` records. **Remaining gap:** `donation_type` and `screening_responses` are not evaluated in `eligibility()`. |
-| **FR-04** | Display each failed eligibility rule and prevent appointment confirmation when any blocking rule fails | **Complete** | `appointment_view` and `my_donor.html` display every failed reason and block appointment booking when any rule fails. |
-| **FR-05** | Allow eligible donor to create, reschedule, or cancel an appointment for an available branch and time slot | **Partial** | Creating (`/appointments/`) and cancelling (`/appointments/<pk>/cancel/`) work. **Remaining gap:** Rescheduling an existing appointment is not implemented. |
-| **FR-06** | Prevent appointment capacity from exceeding configured capacity of a time slot | **Partial** | `appointment_view` checks `slot.available <= 0`. **Remaining gap:** Does not lock the `AppointmentSlot` row with `select_for_update()` inside `transaction.atomic()` for concurrent slot booking (`TC-F03`). |
-| **FR-07** | Display authenticated donor's donation history, appointment history, and eligibility date | **Partial** | `my_donor_record` (`/my-record/`) displays donation history, appointment history, and current eligibility status, **but** `donor.eligibility_date` is not computed from last donation + interval or rendered in `my_donor.html`. |
-| **FR-08** | Allow authorized staff to record temporary or permanent donor deferrals with reason, start date, end date, and approving staff | **Complete** | Implemented in `deferral_view` (`/deferrals/`) and `Deferral` model. Requires `end_date` for temporary deferrals and records `approved_by`. |
-| **FR-09** | Assign unique donation ID and unique blood unit ID to every recorded donation and derived component | **Complete** | `donation_view` generates unique `DON-...` and `UNIT-...` identifiers enforced by `unique=True` DB constraints. |
-| **FR-10** | Record collection time, volume, blood group, component type, collector, and source donor for each blood unit | **Complete** | Recorded in `donation_view` (`/donations/new/`) and stored on `Donation` and `BloodUnit`. |
-| **FR-11** | Store laboratory results for configured mandatory TTI test panel for each unit | **Complete** | `TestType` and `LabResult` store per-unit test outcomes with `unique_together = [("unit", "test_type")]`. |
-| **FR-12** | Prevent unit from entering `Available` state until all mandatory test results are recorded as acceptable | **Complete** | `release_screened_unit` requires all `TestType(required=True)` results to be `ACCEPTABLE` before setting `BloodUnit.Status.AVAILABLE`. |
-| **FR-13** | Place unit in `Quarantined` state when any mandatory screening result is reactive, indeterminate, or incomplete | **Complete** | `release_screened_unit` sets `BloodUnit.Status.QUARANTINED` when any mandatory test is missing, `REACTIVE`, `INDETERMINATE`, or `INCOMPLETE`. |
-| **FR-14** | Manage unit states (`Collected`, `Testing`, `Available`, `Reserved`, `Issued`, `Quarantined`, `Expired`, `Discarded`) and reject invalid state transitions | **Partial** | All 8 states exist on `BloodUnit.Status`. **Remaining gap:** No explicit unit state-machine transition helper rejects invalid direct unit transitions (e.g., `Collected -> Issued` in `TC-F08`) or transitions units to `Discarded`. |
-| **FR-15** | Calculate expiry from collection time, component type, and configured shelf-life rule | **Complete** | `donation_view` calculates `expiry_at = stamp + timedelta(days=rule.days)` from `ShelfLifeRule`. |
-| **FR-16** | Mark unissued unit `Expired` when expiry time is reached and exclude from available stock | **Complete** | `expire_units()` marks expired `AVAILABLE`/`RESERVED` units as `EXPIRED`, and all availability/reservation queries exclude expired units. |
-| **FR-17** | Allow authorized users to search available stock by blood group, component, branch, and expiry date (`BB-24`) | **Complete** | Implemented in `views.inventory`, `views.api_inventory`, and `inventory.html`; verified by `TC-F09` tests. |
-| **FR-18** | Notify designated staff when available stock falls below threshold or unit enters near-expiry period (`BB-25`) | **Complete** | Implemented in `services.get_branch_warnings`, `services.check_stock_and_expiry_alerts`, `check_alerts` command, and `dashboard.html`; verified by `TC-F10` tests. |
-| **FR-19** | Allow hospital staff to create a blood request with all 6 mandatory fields (`BB-26`) | **Complete** | Implemented in `BloodRequestForm` and `views.request_list`; verified by `TC-F11` tests. |
-| **FR-20** | Support `Pending`, `Approved`, `Partially Fulfilled`, `Fulfilled`, `Rejected`, `Cancelled` request states and record actor and time (`BB-27`) | **Complete** | Implemented in `services.transition_request`, `RequestTransition`, and `requests.html`; verified by `TC-F11` tests. |
-| **FR-21** | Allow hospital staff to cancel only a `Pending` request; require blood bank staff after approval (`BB-28`) | **Complete** | Implemented in `views.request_action` and `services.transition_request`; verified by `TC-F12` tests. |
-| **FR-22** | Reserve compatible `Available` units for an approved request without double assignment (`BB-29`) | **Complete** | Implemented in `services.reserve_units`, `services.release_reservation`, and `models.Reservation` (`unique_active_reservation_per_unit`); verified by `TC-F13` tests. |
-| **FR-23** | Record cross-match outcome before a reserved unit is issued (`BB-30`) | **Complete** | Implemented in `models.CrossMatch`, `views.crossmatch_view`, and `services.issue_reservation`; verified by `TC-F13` tests. |
-| **FR-24** | Complete unit issuance and request status update in one database transaction (`BB-31`) | **Complete** | Implemented with `@transaction.atomic` in `services.issue_reservation`; rollback verified by `TC-F13` tests. |
-| **FR-25** | Authenticate Donor, Blood Bank Staff, Hospital Staff, and System Administrator before protected functions are accessed | **Complete** | Enforced by `@login_required`, `allowed()`, and `login_view`. |
-| **FR-26** | Allow system administrator to create, deactivate, and assign one approved role to a user account | **Complete** | In-app screen at `/accounts/` (`views.account_admin`, `account_status`, `account_role`), with `services.create_account`, `set_account_active` and `assign_account_role`: exactly one role per account, a branch for branch-scoped roles, an `AuditEvent` for every account change, open sessions ended on deactivation (`services.end_user_sessions`), and the last active administrator protected from deactivation and demotion (`UC-06`). `UserProfile` edits in `/admin/` are audited too. Verified by `AdminUserManagementTests` (`TC-S02`). |
-| **FR-27** | Allow system administrator to manage branches, time-slot capacities, eligibility rules, shelf-life rules, and stock thresholds | **Complete** | In-app screen at `/configuration/` (`views.configuration`, `configuration_save`), ADMIN only: branch thresholds and time zone, the eligibility rule, component shelf lives and appointment slots. Each section has a validated form (`BranchConfigForm`, `EligibilityRuleForm`, `ShelfLifeRuleForm`, `AppointmentSlotForm`) rejecting an inverted age range, a sub-day interval or shelf life, a zero-capacity slot, a past start and an unknown time zone. Every accepted change is audited; the Django admin is audited by the same `AuditedAdmin`. Verified by `ConfigurationScreenTests` (`TC-F14`). |
-| **FR-28** | Generate inventory, expiry, donation, request, and audit reports for a selected date range and branch | **Complete** | `views.reports` with `REPORT_DEFINITIONS` and `_report_rows`: five selectable report types, `start_date`/`end_date` and branch filters, and `?format=csv` download. Operational users are locked to their own branch (NFR-09); a hospital account is offered only the inventory and request reports and is denied (403 + audit) if it asks for another by name. CSV exports write a `REPORT_EXPORTED` audit event. Verified by `ReportTests` (`TC-F15`). |
-| **FR-29** | Send appointment reminders and request-status notifications through configured email service and record delivery success/failure | **Partial** | `services.notify()` sends and records `SENT`/`FAILED` `Notification` rows for appointment confirmation, request status updates, and stock/expiry alerts. **Remaining gap:** Scheduled appointment reminder command before upcoming slots is not yet implemented. |
-| **FR-30** | Write an audit event for authentication, deferral, screening, inventory, request, issuance, configuration, and account-management changes | **Complete** | Operational actions and unauthorized access attempts already wrote `AuditEvent` records; failed sign-ins (`LOGIN_FAILED`), lockouts (`ACCOUNT_LOCKED`), blocked attempts (`LOGIN_BLOCKED`), configuration changes in `/admin/` (`CONFIGURATION_CREATED` / `CHANGED` / `DELETED`) and account management (`USER_ACCOUNT_*`, `USER_ROLE_ASSIGNED`) now do as well. `AuditCoverageTests` drives one action per category and asserts an event for each (`TC-S03`). |
+| Requirement | Backlog item | Issue | Owner | Sprint | Status | Test case |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| SEC-01 | Server-side authorization on every protected action | `BB-50` (#52) | Niyatee | Sprint 1 | Complete | TC-S02 |
+| SEC-02 | Adaptive password hashing and no plain-text passwords | `BB-51` (#53) | Nishitha | Sprint 1 | Complete | TC-S01 |
+| SEC-03 | Lock account for 15 minutes after 5 failed logins | `BB-52` (#54) | Nishitha | Sprint 1 | Complete | TC-S01 |
+| SEC-04 | Expire idle sessions and invalidate on logout or deactivation | `BB-53` (#55) | Nikita | Sprint 2 | **Open** | TC-S05 |
+| SEC-05 | HTTPS only in production | `BB-54` (#56) | Nimay | Sprint 2 | Complete | Configuration inspection |
+| SEC-06 | CSRF protection and input validation and encoding | `BB-55` (#57) | Nikita | Sprint 1 | Complete | TC-S06 |
+| SEC-07 | Complete, tamper-resistant audit records | `BB-56` (#58) | Niyatee | Sprint 1 | Complete | TC-S03 |
+| SEC-08 | Encrypted backups restricted to backup and admin accounts | `BB-57` (#59) | Nishitha | Sprint 2 | Complete | TC-N03 |
+| SEC-09 | Show only the minimum donor and patient data per role | `BB-58` (#60) | Nimay | Sprint 1 | Complete | TC-S04 |
+| SEC-10 | Generic authentication failure message | `BB-59` (#61) | Nishitha | Sprint 0 (dry run) | Complete | TC-S01 |
 
----
+## Process items
 
-### 2.2 Non-Functional Requirements (`NFR-01` to `NFR-12`)
-
-| Requirement ID | Description | Status | Honest Assessment & Verification |
-| :--- | :--- | :--- | :--- |
-| **NFR-01** | >= 95% of search and dashboard requests return within 3s with 100 concurrent authenticated users (`BB-38`) | **Complete** | Verified with 5,000 donors, 10,000 units, and 100 concurrent authenticated users (`p95 = 1,665.0 ms`, `99.67% <= 3s`). Evidence in `docs/test-results/TC-N01_NFR-01_load_test_results.md`. |
-| **NFR-02** | Stock reservation transaction completes within 5s under load and prevents duplicate reservation (`BB-39`) | **Complete** | Verified under 20-way concurrent reservation contention (`max = 194.45 ms`, `0` duplicate assignments). Evidence in `docs/test-results/TC-N02_NFR-02_reservation_concurrency_results.md`. |
-| **NFR-03** | Monthly service availability target 99.0% | **Complete** | `GET /health/` returns 200 with `{"status": "ok"}` only when the database answers, 503 otherwise, and carries no blood-bank data; it is the `web` healthcheck and the uptime-monitor probe. All five `docker-compose.yml` services use `restart: unless-stopped`, and `db` has a `pg_isready` healthcheck. Target, outage budget and the maintenance-notice policy are in `docs/operations.md`. Verified by `HealthCheckTests`. |
-| **NFR-04** | Scheduled encrypted backup every 24h, retain 7 daily & 4 weekly copies, restore within 4h (`TC-N03`) | **Complete (drill outstanding)** | `scripts/backup.sh` pipes `pg_dump --format=custom` straight into `gpg --encrypt` and prunes to 7 daily and 4 weekly copies; the `backup` compose service runs it every 86400s. `scripts/restore.sh` decrypts, runs `pg_restore --clean --if-exists` and prints its elapsed time. Verified by `BackupAndRestoreTests`. **Remaining:** the TC-N03 drill must be run against a real deployment and its timing recorded in `docs/operations.md`. |
-| **NFR-05** | Preserve committed donation, screening, reservation, and issuance data after application restart (`TC-N04`) | **Complete (drill outstanding)** | PostgreSQL data is on the named volume `postgres_data`, which outlives `docker compose down`. `scripts/restart_persistence_probe.py` writes and re-verifies a donation, screening results, a reservation and an issue, and `scripts/verify_restart_persistence.py` drives the full restart-and-recreate drill. `RestartPersistenceTests` checks the named volume, the probe's record coverage and the driver's steps. **Remaining:** the drill needs Docker and has not been run, so `docs/test-results/TC-N04_NFR-05_restart_persistence_results.md` does not exist yet; steps are in `docs/operations.md` section 4. |
-| **NFR-06** | Support Chrome, Edge, Firefox and viewport widths 360px to 1440px without horizontal scrolling (`TC-N05`) | **Partial** | Responsive CSS media queries (`@media(max-width:850px)` and `@media(max-width:520px)`) exist in `static/style.css`; cross-browser acceptance screenshots not yet recorded. |
-| **NFR-07** | First-time staff user completes donor lookup and check-in within 5 minutes (`TC-N06`) | **Complete** | Supported by `README.md` instructions and streamlined `/donors/` & `/appointments/` UI. |
-| **NFR-08** | Separate presentation, business rules, and data-access code into documented modules with automated unit tests | **Complete** | Separated into `views.py` / `forms.py` / `templates/` (presentation), `services.py` (business rules), `models.py` (data access), and `tests.py` (17 automated test suites). |
-| **NFR-09** | Database schema supports multiple branches while enforcing branch-level access restrictions for operational users (`BB-46`) | **Complete** | Enforced across all views and models; verified by `BranchAccessRestrictionTests` (`TC-S02`). |
-| **NFR-10** | Record dates and times in UTC and display them in the branch time zone configured by administrator (`TC-N07`) | **Partial** | `TIME_ZONE = "UTC"` and `USE_TZ = True` store all timestamps in UTC, and `Branch.timezone_name` exists, **but** branch timezone activation middleware for display is not yet implemented. |
-| **NFR-11** | Do not expose medical-history or screening-result fields in availability search results or hospital-facing reports (`BB-48`) | **Complete** | Enforced in `inventory`, `api_inventory`, `reports`, and `dashboard`; verified by `PrivacyAndMinimumDataPerRoleTests` (`TC-S04`). |
-| **NFR-12** | Support retention and export rules configured to match institutional policy | **Yet to be completed** | No data retention/archival export command is implemented yet. |
-
----
-
-### 2.3 Security Requirements (`SEC-01` to `SEC-10`)
-
-| Requirement ID | Description | Status | Honest Assessment & Verification |
-| :--- | :--- | :--- | :--- |
-| **SEC-01** | Enforce server-side authorization for every protected action according to role-permission matrix (`TC-S02`) | **Partial** | Enforced on all views via `@login_required`, `allowed()`, and `in_branch_scope()`. **Remaining gap:** `ADMIN` is included in `STAFF` set in `views.py`, allowing Admin routine clinical actions unless restricted separately. |
-| **SEC-02** | Store passwords using Django's approved adaptive password hashing mechanism | **Complete** | Uses Django's default PBKDF2 password hasher and `AUTH_PASSWORD_VALIDATORS`. |
-| **SEC-03** | Lock account for 15 minutes after 5 consecutive failed login attempts within 10 minutes and record the event (`TC-S01`) | **Complete** | `services.record_login_failure` locks the account for 15 minutes (`900s`) after 5 failed attempts inside one 10-minute window (`600s`) measured from the first failure, writes a `LOGIN_FAILED` event per attempt and one `ACCOUNT_LOCKED` event on the lockout, and keeps both the counter and the lock in a database-backed cache (`bbms_cache`, migration `0007`) so every worker sees them. Verified by `AccountLockoutTests` (`TC-S01`). |
-| **SEC-04** | Expire authenticated session after 15 minutes of inactivity and invalidate after logout or deactivation (`TC-S05`) | **Complete** | `SESSION_COOKIE_AGE = 900`, `SESSION_SAVE_EVERY_REQUEST = True`, `logout_view` invalidates session, and `allowed()` rejects deactivated (`user.profile.active == False`) accounts immediately. |
-| **SEC-05** | Production deployment redirects HTTP to HTTPS and transmits authenticated traffic only over TLS (`BB-54`) | **Complete** | Configured in `nginx.conf`, `docker-compose.yml`, and `bbms/settings.py`; verified by `ProductionHTTPSConfigurationTests`. |
-| **SEC-06** | Protect state-changing requests against CSRF and validate/encode user-controlled input (`TC-S06`) | **Complete** | `CsrfViewMiddleware` enabled, `{% csrf_token %}` in all forms, `@require_POST` on state-changing actions, and Django template auto-escaping active. |
-| **SEC-07** | Audit records include actor ID, event type, UTC timestamp, affected record ID, and outcome, and are not editable (`TC-S03`) | **Partial** | `AuditEvent` stores all required fields (`actor`, `branch`, `event_type`, `record_type`, `record_id`, `outcome`, `summary`, `created_at`). **Remaining gap:** `AuditEvent` is still registered with default editable `ModelAdmin` in `admin.py`. |
-| **SEC-08** | Database backups encrypted and accessible only to backup service account and administrator (`TC-N03`) | **Complete** | `backup.sh` refuses to run without `BBMS_BACKUP_RECIPIENT`, so no plaintext backup can be produced; it runs under `umask 077` with `0700` directories and `0600` files. Backups and the GPG keyring live on the `backup_data` and `backup_keys` volumes, which only the `backup` service mounts, and decryption additionally needs the private key held by that account and the administrator. Verified by `BackupAndRestoreTests`. |
-| **SEC-09** | Display only the minimum donor and patient information required for the current role and task (`BB-58`) | **Complete** | Enforced across all role views and templates; verified by `PrivacyAndMinimumDataPerRoleTests` (`TC-S04`). |
-| **SEC-10** | Return a generic authentication failure message that does not reveal whether an email address is registered (`TC-S01`) | **Complete** | `login_view` always returns `"Invalid email or password."`; verified by `WorkflowTests.test_authentication_failure_is_generic`. |
-
+| Requirement | Backlog item | Issue | Owner | Sprint | Status | Test case |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| — | Set up GitHub Project, backlog, story points and sprints | `BB-01` (#3) | Nishitha | Sprint 0 (dry run) | Complete | Process |
+| — | Enable GitHub Actions CI for every push and PR | `BB-02` (#4) | Nishitha | Sprint 1 | Complete | Process |
+| — | Automate PRs: labels, assignee, linked issue, templates, branch protection | `BB-03` (#5) | Nishitha | Sprint 1 | Complete | Process |
+| — | Record and upload the 1-minute Sprint 1 demo video | `BB-04` (#6) | Nikita | Sprint 1 | Complete | Process |
+| — | Record and upload the 2-minute Sprint 2 demo video | `BB-05` (#7) | Niyatee, Nishitha, Nikita | Sprint 2 | **Open** | Process |
+| — | Complete documentation and the deviations log | `BB-06` (#8) | Niyatee | Sprint 2 | **Open** | Process |
+| — | Freeze development and tag the v1.0 release | `BB-07` (#9) | Nishitha | Sprint 2 | Complete | Process |

@@ -35,12 +35,16 @@ python3 manage.py seed_demo
 python3 manage.py runserver
 ```
 
-Open `http://127.0.0.1:8000`. Demo accounts use password `demo123`:
+Open `http://127.0.0.1:8000`. Demo accounts use password `demo123`, all in the `MAIN` branch (time zone Asia/Kolkata):
 
-- `staff@bbms.local`
-- `hospital@bbms.local`
-- `admin@bbms.local`
-- `donor@bbms.local`
+| Account | Role | What it can do (SRS Table 4) |
+| :--- | :--- | :--- |
+| `staff@bbms.local` | Blood Bank Staff | Donors, deferrals, appointments, donations, screening, inventory, request approval, reservation, cross-match, issue, branch audit trail |
+| `hospital@bbms.local` | Hospital Staff (City Care Hospital) | Available stock, create and track its own blood requests, inventory and request reports |
+| `admin@bbms.local` | System Administrator | Accounts (`/accounts/`), configuration (`/configuration/`), all reports, audit trail, Django admin; no routine clinical actions |
+| `donor@bbms.local` | Donor | Own record, eligibility, booking, rescheduling and cancelling appointments |
+
+`seed_demo` also creates the five-test mandatory screening panel, shelf-life rules (red cells 35 days, platelets 5, plasma 365), an eligibility rule and one appointment slot. It is safe to run again.
 
 Run automated verification with:
 
@@ -48,6 +52,26 @@ Run automated verification with:
 python3 manage.py test bloodbank
 python3 manage.py check
 ```
+
+To refresh the Test Plan execution record after changing tests, run `python3 scripts/record_test_results.py`. It runs the suite and rewrites [`docs/test-results/TEST_EXECUTION_RESULTS.md`](../docs/test-results/TEST_EXECUTION_RESULTS.md).
+
+## Docker deployment
+
+```sh
+docker compose up -d --build db web scheduler
+docker compose exec web python manage.py migrate
+docker compose exec web python manage.py seed_demo
+```
+
+`nginx` (HTTPS on 443) also needs a certificate and key in `./certs`, and the `backup` service needs `BBMS_BACKUP_RECIPIENT` set to a GPG key. Both are described in [`docs/operations.md`](../docs/operations.md).
+
+## Project documents
+
+- [`docs/deviations.md`](../docs/deviations.md): every difference from the submitted SRS, design and Test Plan, with the reason and where it landed
+- [`docs/test-results/TEST_EXECUTION_RESULTS.md`](../docs/test-results/TEST_EXECUTION_RESULTS.md): the result of every test case
+- [`docs/REQUIREMENTS_AND_TASKS_STATUS.md`](../docs/REQUIREMENTS_AND_TASKS_STATUS.md): requirement-by-requirement status against the backlog
+- [`docs/operations.md`](../docs/operations.md): availability, backup, restore and restart drills
+- `phase1/`: the submitted SRS, Test Plan and design specification
 
 ## Module structure
 
