@@ -1,4 +1,5 @@
 import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django import forms
 from django.contrib.auth.models import User
@@ -7,7 +8,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from .models import (BLOOD_GROUPS, COMPONENT_CODES, DonationType, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
-                     LabResult, Reservation, UserProfile)
+                     EligibilityRule, LabResult, Reservation, ShelfLifeRule, UserProfile)
 
 
 PHONE_PATTERN = re.compile(r"^\+?\d{10,15}$")
@@ -309,4 +310,129 @@ class UserRoleForm(forms.Form):
     def clean(self):
         cleaned = super().clean()
         validate_role_branch(self, cleaned)
+        return cleaned
+
+
+class BranchConfigForm(forms.ModelForm):
+    """FR-27: the per-branch thresholds that drive the low-stock and near-expiry alerts (FR-18)."""
+
+    class Meta:
+        model = Branch
+        fields = ["name", "timezone_name", "low_stock_threshold", "near_expiry_days"]
+
+    def clean_timezone_name(self):
+        name = (self.cleaned_data.get("timezone_name") or "").strip() or "UTC"
+        try:
+            ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise forms.ValidationError("Enter a valid IANA time zone, for example Asia/Kolkata.")
+        return name
+
+    def clean_near_expiry_days(self):
+        days = self.cleaned_data.get("near_expiry_days")
+        if days is not None and days < 1:
+            raise forms.ValidationError("The near-expiry window must be at least one day.")
+        return days
+
+
+class EligibilityRuleForm(forms.ModelForm):
+    """FR-27: the age, weight and interval rules the eligibility engine reads (FR-03)."""
+
+    class Meta:
+        model = EligibilityRule
+        fields = [
+            "min_age", "max_age", "min_weight_kg",
+            "minimum_interval_days", "platelets_interval_days", "plasma_interval_days",
+        ]
+
+    def clean_min_weight_kg(self):
+        weight = self.cleaned_data.get("min_weight_kg")
+        if weight is not None and weight <= 0:
+            raise forms.ValidationError("The minimum weight must be greater than zero.")
+        return weight
+
+    def clean(self):
+        cleaned = super().clean()
+        min_age, max_age = cleaned.get("min_age"), cleaned.get("max_age")
+        if min_age is not None and max_age is not None and min_age >= max_age:
+            self.add_error("max_age", "The maximum age must be greater than the minimum age.")
+        for field in ["minimum_interval_days", "platelets_interval_days", "plasma_interval_days"]:
+            value = cleaned.get(field)
+            if value is not None and value < 1:
+                self.add_error(field, "A donation interval must be at least one day.")
+        return cleaned
+
+
+class ShelfLifeRuleForm(forms.ModelForm):
+    """FR-27: how long each component stays usable, which sets every new unit's expiry (FR-15)."""
+
+    class Meta:
+        model = ShelfLifeRule
+        fields = ["component", "days"]
+
+    def clean_days(self):
+        days = self.cleaned_data.get("days")
+        if days is not None and days < 1:
+            raise forms.ValidationError("A shelf life must be at least one day.")
+        return days
+
+
+class AppointmentSlotForm(forms.ModelForm):
+    """FR-27: donation slots, whose capacity FR-06 enforces against concurrent bookings."""
+
+    class Meta:
+        model = AppointmentSlot
+        fields = ["branch", "starts_at", "capacity"]
+        widgets = {"starts_at": forms.DateTimeInput(attrs={"type": "datetime-local"})}
+
+    def clean_capacity(self):
+        capacity = self.cleaned_data.get("capacity")
+        if capacity is None or capacity < 1:
+            raise forms.ValidationError("A slot must have capacity for at least one donor.")
+        return capacity
+
+    def clean_starts_at(self):
+        starts_at = self.cleaned_data.get("starts_at")
+        if starts_at and starts_at <= timezone.now():
+            raise forms.ValidationError("A new slot must start in the future.")
+        return starts_at
+
+
+class ReportFilterForm(forms.Form):
+    """FR-28: pick one of the five report types and narrow it by date range and branch."""
+
+    REPORT_CHOICES = [
+        ("inventory", "Inventory"),
+        ("expiry", "Expiry"),
+        ("donation", "Donations"),
+        ("request", "Blood requests"),
+        ("audit", "Audit trail"),
+    ]
+
+    report = forms.ChoiceField(choices=REPORT_CHOICES, required=False, label="Report")
+    start_date = forms.DateField(required=False, widget=forms.DateInput(attrs={"type": "date"}))
+    end_date = forms.DateField(required=False, widget=forms.DateInput(attrs={"type": "date"}))
+    branch = forms.ModelChoiceField(
+        queryset=Branch.objects.order_by("name"), required=False, empty_label="All branches",
+    )
+
+    def __init__(self, *args, allowed_reports=None, lock_branch=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if allowed_reports is not None:
+            self.fields["report"].choices = [c for c in self.REPORT_CHOICES if c[0] in allowed_reports]
+        if lock_branch is not None:
+            # NFR-09: operational users never choose a branch other than their own.
+            self.fields["branch"].queryset = Branch.objects.filter(pk=lock_branch.pk)
+            self.fields["branch"].empty_label = None
+            self.fields["branch"].initial = lock_branch
+
+    def clean_report(self):
+        report = self.cleaned_data.get("report")
+        return report or self.fields["report"].choices[0][0]
+
+    def clean(self):
+        cleaned = super().clean()
+        start, end = cleaned.get("start_date"), cleaned.get("end_date")
+        if start and end and end < start:
+            self.add_error("end_date", "The end date cannot be before the start date.")
         return cleaned

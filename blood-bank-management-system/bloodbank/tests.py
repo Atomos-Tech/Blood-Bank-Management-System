@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone as dt_timezone
+import csv
 import importlib
+import io
 from io import StringIO
 import json
 import os
@@ -12,7 +14,7 @@ from django.contrib.auth.models import User
 from django.contrib.sessions.models import Session
 from django.core.cache import cache
 from django.core.management import call_command
-from django.db import IntegrityError
+from django.db import IntegrityError, OperationalError
 from django.urls import reverse
 import threading
 
@@ -1895,6 +1897,8 @@ class RolePermissionMatrixTests(TestCase):
             ("post", f"/reservations/{self.reservation.pk}/release/", {}, {S}),
             ("get", "/audit/", None, {S, A}),
             ("get", "/accounts/", None, {A}),
+            ("get", "/configuration/", None, {A}),
+            ("post", "/configuration/branch/", {"pk": self.branch.pk}, {A}),
             ("post", f"/accounts/{self.donor_profile.pk}/status/", {"active": "0"}, {A}),
             ("post", f"/accounts/{self.donor_profile.pk}/role/", {"role": "DONOR", "branch": ""}, {A}),
             ("get", "/reports/", None, {S, H, A}),
@@ -2837,11 +2841,19 @@ class CsrfAndOutputEncodingTests(TestCase):
         self.assertContains(response, "&lt;script&gt;")
 
 
+# The routes that answer without a session, and why each one is allowed to.
+PUBLIC_ROUTES = {
+    "login": "the sign-in page itself",
+    "logout": "POST-only; ends a session that may already be gone",
+    "health": "NFR-03 liveness probe for the load balancer and uptime monitor",
+}
+
+
 def protected_paths():
-    """Every bloodbank route except the sign-in pair, with placeholder arguments."""
+    """Every bloodbank route except the public ones, with placeholder arguments."""
     paths = []
     for pattern in bloodbank_urls.urlpatterns:
-        if pattern.name in {"login", "logout"}:
+        if pattern.name in PUBLIC_ROUTES:
             continue
         args = ["approve" if group == "action" else 1 for group in pattern.pattern.regex.groupindex]
         paths.append(reverse(pattern.name, args=args))
@@ -2908,7 +2920,7 @@ class AuthenticationAcrossRolesTests(SprintOneSecurityFixture):
         self.assertNotIn("_auth_user_id", self.client.session)
         self.assertEqual(self.rendered_messages(response), [GENERIC_LOGIN_ERROR])
 
-    def test_every_route_but_the_sign_in_pair_requires_an_authenticated_user(self):
+    def test_every_route_but_the_public_ones_requires_an_authenticated_user(self):
         """FR-25: read from urls.py, so a view added without login protection fails here."""
         paths = protected_paths()
         self.assertGreater(len(paths), 20)
@@ -3359,6 +3371,13 @@ class AuditCoverageTests(SprintOneSecurityFixture):
         self.assertEqual(event.branch, self.branch)
         self.assertIn("low_stock_threshold", event.summary)
 
+    def test_fr30_report_exports_are_audited(self):
+        self.client.force_login(self.staff)
+        self.client.get("/reports/?report=inventory&format=csv")
+        event = AuditEvent.objects.get(event_type="REPORT_EXPORTED")
+        self.assertEqual(event.actor, self.staff)
+        self.assertEqual(event.record_id, "inventory")
+
     def test_fr30_a_deleted_configuration_row_is_still_audited(self):
         admin_client = Client()
         admin_client.force_login(self.admin)
@@ -3368,3 +3387,362 @@ class AuditCoverageTests(SprintOneSecurityFixture):
         event = AuditEvent.objects.get(event_type="CONFIGURATION_DELETED")
         self.assertEqual(event.record_id, str(rule.pk))
         self.assertEqual(event.record_type, "ShelfLifeRule")
+
+
+class HealthCheckTests(TestCase):
+    """BB-40 [NFR-03]: the liveness probe the uptime monitor and the container healthcheck poll."""
+
+    COMPOSE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+
+    def test_nfr03_health_is_public_and_reports_the_database(self):
+        response = self.client.get("/health/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.content), {"status": "ok", "database": "up"})
+
+    def test_nfr03_health_is_the_only_unauthenticated_route_besides_sign_in(self):
+        named = {p.name for p in bloodbank_urls.urlpatterns if p.name}
+        self.assertEqual(PUBLIC_ROUTES.keys() & named, {"login", "logout", "health"})
+
+    def test_nfr03_health_returns_503_when_the_database_is_down(self):
+        with patch("bloodbank.views.connection.cursor", side_effect=OperationalError("db is down")):
+            response = self.client.get("/health/")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(json.loads(response.content)["status"], "unavailable")
+
+    def test_nfr03_health_body_leaks_nothing_about_the_blood_bank(self):
+        Branch.objects.create(name="Secret Branch", code="SECRET")
+        body = self.client.get("/health/").content.decode()
+        self.assertNotIn("SECRET", body)
+        self.assertEqual(set(json.loads(body)), {"status", "database"})
+
+    def test_nfr03_every_compose_service_restarts_itself_and_the_app_is_health_checked(self):
+        compose = self.COMPOSE.read_text()
+        self.assertEqual(compose.count("restart: unless-stopped"), 5)
+        self.assertIn("pg_isready", compose)
+        self.assertIn("/health/", compose)
+
+
+class ConfigurationScreenTests(SprintOneSecurityFixture):
+    """BB-34 [FR-27] & TC-F14: the administrator configures branches, slots, rules and thresholds,
+    with validation, and every change is audited."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = self.users["ADMIN"]
+        self.client.force_login(self.admin)
+        self.rule = EligibilityRule.objects.create(
+            min_age=18, max_age=65, min_weight_kg=50, minimum_interval_days=90,
+        )
+        self.shelf_life = ShelfLifeRule.objects.create(component="Plasma", days=365)
+
+    def branch_payload(self, **overrides):
+        payload = {
+            "pk": self.branch.pk,
+            f"branch-{self.branch.pk}-name": self.branch.name,
+            f"branch-{self.branch.pk}-timezone_name": "Asia/Kolkata",
+            f"branch-{self.branch.pk}-low_stock_threshold": 9,
+            f"branch-{self.branch.pk}-near_expiry_days": 10,
+        }
+        payload.update(overrides)
+        return payload
+
+    def eligibility_payload(self, **overrides):
+        payload = {
+            "min_age": 18, "max_age": 65, "min_weight_kg": "50.0",
+            "minimum_interval_days": 90, "platelets_interval_days": 14, "plasma_interval_days": 28,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_fr27_only_the_administrator_reaches_the_configuration_screen(self):
+        for role_name in ["STAFF", "HOSPITAL", "DONOR"]:
+            with self.subTest(role=role_name):
+                client = Client()
+                client.force_login(self.users[role_name])
+                self.assertEqual(client.get("/configuration/").status_code, 403)
+                self.assertEqual(
+                    client.post("/configuration/branch/", self.branch_payload()).status_code, 403
+                )
+        self.assertEqual(self.client.get("/configuration/").status_code, 200)
+
+    def test_fr27_branch_thresholds_are_saved_and_audited(self):
+        self.client.post("/configuration/branch/", self.branch_payload())
+        self.branch.refresh_from_db()
+        self.assertEqual(self.branch.low_stock_threshold, 9)
+        self.assertEqual(self.branch.near_expiry_days, 10)
+        event = AuditEvent.objects.get(event_type="CONFIGURATION_CHANGED", record_type="Branch")
+        self.assertEqual(event.actor, self.admin)
+        self.assertIn("low_stock_threshold", event.summary)
+
+    def test_tc_f14_an_invalid_age_range_is_refused_and_nothing_is_saved(self):
+        response = self.client.post(
+            "/configuration/eligibility/", self.eligibility_payload(min_age=70, max_age=65)
+        )
+        self.assertEqual(response.status_code, 200)
+        self.rule.refresh_from_db()
+        self.assertEqual(self.rule.min_age, 18)
+        self.assertFalse(AuditEvent.objects.filter(event_type="CONFIGURATION_CHANGED").exists())
+        self.assertContains(response, "maximum age must be greater")
+
+    def test_tc_f14_a_slot_needs_capacity_of_at_least_one_and_a_future_start(self):
+        future = (timezone.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
+        past = (timezone.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
+
+        zero = self.client.post(
+            "/configuration/slot/", {"branch": self.branch.pk, "starts_at": future, "capacity": 0}
+        )
+        self.assertContains(zero, "at least one donor")
+        self.assertEqual(AppointmentSlot.objects.count(), 0)
+
+        stale = self.client.post(
+            "/configuration/slot/", {"branch": self.branch.pk, "starts_at": past, "capacity": 5}
+        )
+        self.assertContains(stale, "must start in the future")
+        self.assertEqual(AppointmentSlot.objects.count(), 0)
+
+        self.client.post(
+            "/configuration/slot/", {"branch": self.branch.pk, "starts_at": future, "capacity": 5}
+        )
+        self.assertEqual(AppointmentSlot.objects.count(), 1)
+        self.assertTrue(AuditEvent.objects.filter(
+            event_type="CONFIGURATION_CREATED", record_type="AppointmentSlot",
+        ).exists())
+
+    def test_tc_f14_an_interval_or_shelf_life_below_one_day_is_refused(self):
+        bad_interval = self.client.post(
+            "/configuration/eligibility/", self.eligibility_payload(platelets_interval_days=0)
+        )
+        self.assertContains(bad_interval, "at least one day")
+
+        bad_shelf = self.client.post(
+            "/configuration/shelf-life/",
+            {"pk": self.shelf_life.pk, f"shelf-{self.shelf_life.pk}-component": "Plasma",
+             f"shelf-{self.shelf_life.pk}-days": 0},
+        )
+        self.assertContains(bad_shelf, "at least one day")
+        self.shelf_life.refresh_from_db()
+        self.assertEqual(self.shelf_life.days, 365)
+
+    def test_fr27_an_unknown_time_zone_is_refused(self):
+        response = self.client.post(
+            "/configuration/branch/",
+            self.branch_payload(**{f"branch-{self.branch.pk}-timezone_name": "Mars/Olympus"}),
+        )
+        self.assertContains(response, "valid IANA time zone")
+
+    def test_fr27_saving_the_eligibility_rule_changes_what_the_engine_applies(self):
+        self.client.post("/configuration/eligibility/", self.eligibility_payload(min_age=40))
+        self.rule.refresh_from_db()
+        self.assertEqual(self.rule.min_age, 40)
+        young = Donor.objects.create(
+            branch=self.branch, full_name="Young Donor", email="young@sprint.test",
+            phone="9000000222", date_of_birth=timezone.localdate() - timedelta(days=25 * 365),
+            weight_kg=70, blood_group="O+", medical_history="None", consent_given=True,
+        )
+        ok, reasons = eligibility(young)
+        self.assertFalse(ok)
+        self.assertTrue(any("age" in reason.lower() for reason in reasons))
+
+
+class ReportTests(SprintOneSecurityFixture):
+    """BB-35 [FR-28] & TC-F15: five report types, date-range and branch filters, CSV download,
+    and no medical fields in hospital-facing reports."""
+
+    def setUp(self):
+        super().setUp()
+        self.staff = self.users["STAFF"]
+        self.hospital = self.users["HOSPITAL"]
+        ShelfLifeRule.objects.create(component="Plasma", days=365)
+        self.donor = Donor.objects.create(
+            branch=self.branch, full_name="Reportable Donor", email="reportable@sprint.test",
+            phone="9000000333", date_of_birth=timezone.localdate() - timedelta(days=30 * 365),
+            weight_kg=70, blood_group="O+", medical_history="CONFIDENTIAL-REPORT-NOTE",
+            consent_given=True,
+        )
+        self.old_donation = Donation.objects.create(
+            donation_id="DON-OLD-1", donor=self.donor, collected_at=timezone.now() - timedelta(days=40),
+            collector=self.staff, branch=self.branch,
+        )
+        self.new_donation = Donation.objects.create(
+            donation_id="DON-NEW-1", donor=self.donor, collected_at=timezone.now() - timedelta(days=1),
+            collector=self.staff, branch=self.branch,
+        )
+        for donation, unit_id, status in [
+            (self.old_donation, "UNIT-OLD-1", BloodUnit.Status.AVAILABLE),
+            (self.new_donation, "UNIT-NEW-1", BloodUnit.Status.AVAILABLE),
+            (self.new_donation, "UNIT-QUAR-1", BloodUnit.Status.QUARANTINED),
+        ]:
+            BloodUnit.objects.create(
+                unit_id=unit_id, donation=donation, blood_group="O+", component="Plasma",
+                volume_ml=220, expiry_at=timezone.now() + timedelta(days=30),
+                branch=self.branch, status=status,
+            )
+        self.request = BloodRequest.objects.create(
+            hospital="Sprint Hospital", created_by=self.hospital, branch=self.branch,
+            blood_group="O+", component="Plasma", quantity=1, priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1), clinical_reference="REF-RPT-1",
+        )
+
+    def body(self, response):
+        return response.content.decode()
+
+    def test_fr28_all_five_report_types_are_available_to_staff(self):
+        self.client.force_login(self.staff)
+        for report in ["inventory", "expiry", "donation", "request", "audit"]:
+            with self.subTest(report=report):
+                response = self.client.get(f"/reports/?report={report}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.context["report"], report)
+                self.assertTrue(response.context["columns"])
+
+    def test_tc_f15_the_date_range_filter_narrows_the_donation_report(self):
+        self.client.force_login(self.staff)
+        everything = self.client.get("/reports/?report=donation")
+        self.assertEqual(everything.context["row_count"], 2)
+
+        since = (timezone.localdate() - timedelta(days=7)).isoformat()
+        recent = self.client.get(f"/reports/?report=donation&start_date={since}")
+        self.assertEqual(recent.context["row_count"], 1)
+        self.assertIn("DON-NEW-1", self.body(recent))
+        self.assertNotIn("DON-OLD-1", self.body(recent))
+
+    def test_tc_f15_an_end_date_before_the_start_date_is_refused(self):
+        self.client.force_login(self.staff)
+        response = self.client.get(
+            "/reports/?report=donation&start_date=2026-10-20&end_date=2026-10-10"
+        )
+        self.assertContains(response, "cannot be before the start date")
+
+    def test_fr28_the_branch_filter_scopes_an_administrator_report(self):
+        other = Branch.objects.create(name="Other Branch", code="OTH")
+        self.client.force_login(self.users["ADMIN"])
+        mine = self.client.get(f"/reports/?report=inventory&branch={self.branch.pk}")
+        self.assertEqual(mine.context["row_count"], 3)
+        theirs = self.client.get(f"/reports/?report=inventory&branch={other.pk}")
+        self.assertEqual(theirs.context["row_count"], 0)
+
+    def test_fr28_csv_download_carries_the_same_rows_as_the_page(self):
+        self.client.force_login(self.staff)
+        page = self.client.get("/reports/?report=inventory")
+        csv_response = self.client.get("/reports/?report=inventory&format=csv")
+        self.assertEqual(csv_response["Content-Type"], "text/csv")
+        self.assertIn("attachment; filename=", csv_response["Content-Disposition"])
+        rows = list(csv.reader(io.StringIO(self.body(csv_response))))
+        self.assertEqual(rows[0], page.context["columns"])
+        self.assertEqual(len(rows) - 1, page.context["row_count"])
+        self.assertIn("UNIT-NEW-1", self.body(csv_response))
+
+    def test_tc_f15_a_hospital_report_hides_donor_and_medical_data(self):
+        self.client.force_login(self.hospital)
+        for report in ["inventory", "request"]:
+            with self.subTest(report=report):
+                for suffix in ["", "&format=csv"]:
+                    text = self.body(self.client.get(f"/reports/?report={report}{suffix}"))
+                    self.assertNotIn("Reportable Donor", text)
+                    self.assertNotIn("CONFIDENTIAL-REPORT-NOTE", text)
+                    self.assertNotIn("reportable@sprint.test", text)
+                    self.assertNotIn("UNIT-QUAR-1", text)
+
+    def test_tc_f15_a_hospital_cannot_reach_the_donor_or_audit_reports(self):
+        self.client.force_login(self.hospital)
+        for report in ["donation", "audit", "expiry"]:
+            with self.subTest(report=report):
+                self.assertEqual(self.client.get(f"/reports/?report={report}").status_code, 403)
+
+    def test_tc_f15_a_hospital_sees_only_its_own_requests(self):
+        other_hospital = User.objects.create_user("other.hosp@sprint.test", password=self.PASSWORD)
+        UserProfile.objects.create(
+            user=other_hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch,
+            hospital_name="Other Hospital",
+        )
+        BloodRequest.objects.create(
+            hospital="Other Hospital", created_by=other_hospital, branch=self.branch,
+            blood_group="A+", component="Plasma", quantity=2, priority="Routine",
+            required_by=timezone.now() + timedelta(days=2), clinical_reference="REF-OTHER-1",
+        )
+        self.client.force_login(self.hospital)
+        text = self.body(self.client.get("/reports/?report=request"))
+        self.assertIn("Sprint Hospital", text)
+        self.assertNotIn("Other Hospital", text)
+
+    def test_fr28_staff_reports_stay_inside_their_own_branch(self):
+        other = Branch.objects.create(name="Other Branch", code="OTH")
+        self.client.force_login(self.staff)
+        response = self.client.get(f"/reports/?report=inventory&branch={other.pk}")
+        self.assertEqual(response.status_code, 403)
+
+
+class BackupAndRestoreTests(TestCase):
+    """BB-41 [NFR-04] & BB-57 [SEC-08], checked during TC-N03: daily encrypted backups with
+    7 daily and 4 weekly copies, a timed restore, and confidentiality of both."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    DOCS = ROOT.parent / "docs" / "operations.md"
+
+    @property
+    def backup(self):
+        return (self.ROOT / "scripts" / "backup.sh").read_text()
+
+    @property
+    def restore(self):
+        return (self.ROOT / "scripts" / "restore.sh").read_text()
+
+    def test_nfr04_both_scripts_exist_and_are_executable(self):
+        for name in ["backup.sh", "restore.sh"]:
+            script = self.ROOT / "scripts" / name
+            with self.subTest(script=name):
+                self.assertTrue(script.exists(), f"{name} is missing")
+                self.assertTrue(os.access(script, os.X_OK), f"{name} is not executable")
+
+    def test_nfr04_the_backup_dumps_with_pg_dump_and_encrypts_before_writing(self):
+        backup = self.backup
+        self.assertIn("pg_dump", backup)
+        self.assertIn("gpg", backup)
+        # The dump is piped straight into gpg, so no plaintext copy is ever written.
+        self.assertRegex(backup, r"pg_dump[\s\S]*?\|\s*\\?\s*\n?\s*gpg")
+        self.assertIn("--encrypt", backup)
+
+    def test_sec_08_the_backup_refuses_to_run_without_a_recipient_key(self):
+        self.assertIn("BBMS_BACKUP_RECIPIENT", self.backup)
+        self.assertRegex(self.backup, r'if \[ -z "\$RECIPIENT" \]')
+        self.assertIn("refusing to write an unencrypted backup", self.backup)
+
+    def test_sec_08_backups_are_readable_only_by_the_backup_account(self):
+        backup = self.backup
+        self.assertIn("umask 077", backup)
+        self.assertIn("chmod 700", backup)
+        self.assertIn("chmod 600", backup)
+
+    def test_nfr04_retention_keeps_seven_daily_and_four_weekly_copies(self):
+        backup = self.backup
+        self.assertIn("DAILY_KEEP=7", backup)
+        self.assertIn("WEEKLY_KEEP=4", backup)
+        self.assertIn('prune "$BACKUP_DIR/daily" "$DAILY_KEEP"', backup)
+        self.assertIn('prune "$BACKUP_DIR/weekly" "$WEEKLY_KEEP"', backup)
+
+    def test_tc_n03_the_restore_decrypts_loads_and_reports_its_duration(self):
+        restore = self.restore
+        self.assertIn("gpg --batch --yes --decrypt", restore)
+        self.assertIn("pg_restore", restore)
+        self.assertIn("elapsed", restore)
+        self.assertIn("4 hours", restore)
+        # The plaintext dump lives in a 0700 temporary directory that is always removed.
+        self.assertIn("mktemp -d", restore)
+        self.assertIn('trap \'rm -rf -- "$workdir"\' EXIT', restore)
+
+    def test_nfr04_compose_runs_the_backup_every_24_hours_on_private_volumes(self):
+        compose = (self.ROOT / "docker-compose.yml").read_text()
+        self.assertIn("backup.sh", compose)
+        self.assertIn("sleep 86400", compose)
+        self.assertIn("backup_data:/var/backups/bbms", compose)
+        self.assertIn("backup_keys:/root/.gnupg", compose)
+        # SEC-08: no other service mounts the backup or key volumes.
+        self.assertEqual(compose.count("backup_data:/var/backups/bbms"), 1)
+        self.assertEqual(compose.count("backup_keys:/root/.gnupg"), 1)
+
+    def test_nfr04_the_procedure_and_its_recovery_objective_are_documented(self):
+        docs = self.DOCS.read_text()
+        for expected in ["NFR-03", "NFR-04", "SEC-08", "TC-N03", "/health/",
+                         "4 hours", "7", "4", "restore.sh", "Maintenance"]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, docs)

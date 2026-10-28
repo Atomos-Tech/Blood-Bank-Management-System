@@ -6,6 +6,14 @@ services:
       POSTGRES_USER: bbms
       POSTGRES_PASSWORD: change-before-deployment
     volumes: [postgres_data:/var/lib/postgresql/data]
+    # NFR-03: every service restarts by itself so a crash costs seconds, not the outage
+    # budget that 99.0% monthly availability allows (about 7h 18m a month).
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bbms -d bbms"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
   web:
     build: .
     command: gunicorn bbms.wsgi:application --bind 0.0.0.0:8000
@@ -18,6 +26,14 @@ services:
       BBMS_SECURE_SSL: "1"
       BBMS_DEBUG: "0"
     depends_on: [db]
+    restart: unless-stopped
+    healthcheck:
+      # NFR-03: the same endpoint the uptime monitor polls; 200 means app and database are up.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=5).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
   scheduler:
     # Scheduled tasks share the application code but run as a separate process (SADS 3.4).
     build: .
@@ -31,6 +47,29 @@ services:
       BBMS_DEBUG: "0"
     depends_on: [db]
     restart: unless-stopped
+  backup:
+    # NFR-04 / SEC-08: one encrypted dump every 24 hours, 7 daily and 4 weekly copies kept.
+    # The image needs pg_dump and gpg; BBMS_BACKUP_RECIPIENT names the key the dump is
+    # encrypted to, and backup.sh refuses to run without it.
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      'apk add --no-cache gnupg bash >/dev/null &&
+       while true; do bash /app/scripts/backup.sh || echo "backup failed"; sleep 86400; done'
+    environment:
+      POSTGRES_DB: bbms
+      POSTGRES_USER: bbms
+      POSTGRES_PASSWORD: change-before-deployment
+      POSTGRES_HOST: db
+      BBMS_BACKUP_DIR: /var/backups/bbms
+      BBMS_BACKUP_RECIPIENT: "${BBMS_BACKUP_RECIPIENT:-backup@bbms.local}"
+    volumes:
+      - "./scripts:/app/scripts:ro"
+      # SEC-08: backups and the GPG keyring stay on volumes only this service mounts.
+      - backup_data:/var/backups/bbms
+      - backup_keys:/root/.gnupg
+    depends_on: [db]
+    restart: unless-stopped
   nginx:
     image: nginx:1.27-alpine
     ports:
@@ -40,5 +79,8 @@ services:
       - "./nginx.conf:/etc/nginx/conf.d/default.conf:ro"
       - "./certs:/etc/nginx/certs:ro"
     depends_on: [web]
+    restart: unless-stopped
 volumes:
   postgres_data:
+  backup_data:
+  backup_keys:
