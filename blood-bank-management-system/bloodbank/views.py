@@ -22,7 +22,9 @@ from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, Blo
                      Notification, Reservation, ShelfLifeRule, TestType, UserProfile)
 from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR, LastAdministrator,
                        account_is_locked, active_eligibility_rule, assign_account_role, audit,
-                       audit_reference, book_appointment,
+                       audit_reference, book_appointment, create_blood_request, find_idempotent_request,
+                       hospital_may_cancel, MissingHospitalAssignment, record_crossmatch, record_deferral,
+                       register_donor, request_action_target, save_configuration,
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
                        check_stock_and_expiry_alerts, clear_login_failures, create_account,
                        discard_unit, eligibility,
@@ -77,14 +79,9 @@ def in_branch_scope(user, target_branch):
 
 def deny(user, summary=""):
     if user.is_authenticated:
-        AuditEvent.objects.create(
-            actor=user,
+        audit_reference(
+            user, "UNAUTHORIZED_ACCESS", "Security", "N/A", outcome="DENIED", summary=summary,
             branch=getattr(getattr(user, "profile", None), "branch", None),
-            event_type="UNAUTHORIZED_ACCESS",
-            record_type="Security",
-            record_id="N/A",
-            outcome="DENIED",
-            summary=summary,
         )
     return HttpResponseForbidden("This account is not permitted to perform that action.")
 
@@ -262,14 +259,7 @@ def donor_list(request):
         return deny(request.user, "Cross-branch donor access denied")
     form = DonorForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        donor = form.save(commit=False)
-        if ub and donor.branch_id is None:
-            donor.branch = ub
-        donor.save()
-        audit(
-            request.user, "DONOR_REGISTERED", donor,
-            summary="Consent captured; screening questionnaire completed", branch=donor.branch,
-        )
+        register_donor(form.save(commit=False), request.user, branch=ub)
         messages.success(request, "Donor registered.")
         return redirect("donors")
     donors_qs = Donor.objects.order_by("-created_at")
@@ -451,10 +441,7 @@ def deferral_view(request):
         d = form.save(commit=False)
         if d.donor.branch_id and not in_branch_scope(request.user, d.donor.branch_id):
             return deny(request.user, "Cross-branch deferral denied")
-        d.approved_by = request.user  # FR-08: approving staff comes from the session, never the form
-        d.save()
-        kind = "Permanent" if d.permanent else f"Temporary until {d.end_date}"
-        audit(request.user, "DEFERRAL_RECORDED", d, summary=f"{kind}: {d.reason}", branch=d.donor.branch or ub)
+        record_deferral(d, request.user, branch=ub)
         messages.success(request, "Deferral recorded.")
         return redirect("deferrals")
     items = Deferral.objects.select_related("donor", "approved_by").order_by("-start_date", "-pk")
@@ -624,23 +611,18 @@ def request_list(request):
 
     if request.method == "POST":
         idem_key = _get_idempotency_key(request, request.POST)
-        if idem_key:
-            existing = BloodRequest.objects.filter(idempotency_key=idem_key, created_by=request.user).first()
-            if existing:
-                messages.success(request, "Blood request submitted.")
-                return redirect("requests")
+        if find_idempotent_request(request.user, idem_key):
+            messages.success(request, "Blood request submitted.")
+            return redirect("requests")
         if form.is_valid():
             r = form.save(commit=False)
             if not in_branch_scope(request.user, r.branch_id):
                 return deny(request.user, "Cross-branch blood request creation denied")
-            r.created_by = request.user
-            r.hospital = request.user.profile.hospital_name
-            r.idempotency_key = idem_key
-            if not r.hospital:
-                form.add_error(None, "Hospital staff account is missing its verified hospital assignment.")
+            try:
+                create_blood_request(r, request.user, idem_key)
+            except MissingHospitalAssignment as e:
+                form.add_error(None, str(e))
             else:
-                r.save()
-                audit(request.user, "BLOOD_REQUEST_CREATED", r, branch=r.branch)
                 messages.success(request, "Blood request submitted.")
                 return redirect("requests")
     return render(request, "bloodbank/requests.html", {"requests": qs.order_by("-created_at"), "form": form})
@@ -652,29 +634,22 @@ def request_action(request, pk, action):
     r = get_object_or_404(BloodRequest.objects.select_related("branch", "created_by"), pk=pk)
     if not in_branch_scope(request.user, r.branch_id):
         return deny(request.user, "Cross-branch request action denied")
-    if action == "cancel":
+    target = request_action_target(action)
+    if target == BloodRequest.Status.CANCELLED:
         if role(request.user) == UserProfile.Role.HOSPITAL:
-            if r.created_by_id != request.user.id or r.status != BloodRequest.Status.PENDING:
+            if not allowed(request.user, {UserProfile.Role.HOSPITAL}) or not hospital_may_cancel(r, request.user):
                 return deny(request.user, "Hospital staff can cancel only their own Pending requests")
         elif not allowed(request.user, STAFF):
             return deny(request.user)
-        try:
-            transition_request(r, BloodRequest.Status.CANCELLED, request.user)
-        except ValueError as e:
-            messages.error(request, str(e))
     else:
         if not allowed(request.user, STAFF):
             return deny(request.user)
-        target = {
-            "approve": BloodRequest.Status.APPROVED,
-            "reject": BloodRequest.Status.REJECTED,
-        }.get(action)
-        if not target:
+        if target is None:
             return deny(request.user, f"Unsupported request action {action}")
-        try:
-            transition_request(r, target, request.user)
-        except ValueError as e:
-            messages.error(request, str(e))
+    try:
+        transition_request(r, target, request.user)
+    except ValueError as e:
+        messages.error(request, str(e))
     return redirect("requests")
 
 
@@ -720,12 +695,12 @@ def crossmatch_view(request, pk):
         return deny(request.user, "Cross-branch cross-match denied")
     form = CrossMatchForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        CrossMatch.objects.update_or_create(
-            reservation=reservation,
-            defaults={"outcome": form.cleaned_data["outcome"], "recorded_by": request.user},
-        )
-        audit(request.user, "CROSSMATCH_RECORDED", reservation, branch=reservation.request.branch)
-        return redirect("requests")
+        try:
+            record_crossmatch(reservation, form.cleaned_data["outcome"], request.user)
+        except ValueError as e:
+            form.add_error(None, str(e))
+        else:
+            return redirect("requests")
     return render(request, "bloodbank/form.html", {"title": "Record cross-match", "form": form, "cancel": "requests"})
 
 
@@ -920,14 +895,7 @@ def configuration_save(request, section):
         messages.error(request, "Configuration not saved: fix the errors shown.")
         return _configuration_page(request, {(section, getattr(instance, "pk", None)): form})
 
-    changed = ", ".join(form.changed_data) or "no fields"
-    record = form.save()
-    audit(
-        request.user,
-        "CONFIGURATION_CHANGED" if instance is not None else "CONFIGURATION_CREATED",
-        record,
-        summary=f"{record._meta.verbose_name} {record}: {changed}",
-    )
+    record = save_configuration(form, request.user)
     messages.success(request, f"{record._meta.verbose_name.capitalize()} saved.")
     return redirect("configuration")
 
@@ -1133,24 +1101,9 @@ def api_create_request(request):
         return api_error("invalid_json", "Request body must be valid JSON.", status=400)
 
     idem_key = _get_idempotency_key(request, data)
-    if idem_key:
-        existing = BloodRequest.objects.filter(idempotency_key=idem_key, created_by=request.user).first()
-        if existing:
-            return JsonResponse(
-                {
-                    "id": existing.pk,
-                    "hospital": existing.hospital,
-                    "branch": existing.branch.code,
-                    "blood_group": existing.blood_group,
-                    "component": existing.component,
-                    "quantity": existing.quantity,
-                    "priority": existing.priority,
-                    "required_by": existing.required_by.isoformat(),
-                    "clinical_reference": existing.clinical_reference,
-                    "status": existing.status,
-                },
-                status=200,
-            )
+    existing = find_idempotent_request(request.user, idem_key)
+    if existing:
+        return JsonResponse(_request_payload(existing), status=200)
 
     ub = user_branch(request.user)
     if "branch" not in data and ub is not None:
@@ -1163,33 +1116,31 @@ def api_create_request(request):
     if not in_branch_scope(request.user, r.branch_id):
         deny(request.user, "Cross-branch API request creation denied")
         return api_error("forbidden", "Cross-branch access denied.", status=403)
-    r.created_by = request.user
-    r.hospital = getattr(getattr(request.user, "profile", None), "hospital_name", "")
-    if not r.hospital:
+    try:
+        create_blood_request(r, request.user, idem_key)
+    except MissingHospitalAssignment as e:
         return api_error(
             "validation_error",
-            "Hospital staff account is missing its verified hospital assignment.",
+            str(e),
             status=400,
             field_errors={"hospital": ["Verified hospital assignment required."]},
         )
-    r.idempotency_key = idem_key
-    r.save()
-    audit(request.user, "BLOOD_REQUEST_CREATED", r, branch=r.branch)
-    return JsonResponse(
-        {
-            "id": r.pk,
-            "hospital": r.hospital,
-            "branch": r.branch.code,
-            "blood_group": r.blood_group,
-            "component": r.component,
-            "quantity": r.quantity,
-            "priority": r.priority,
-            "required_by": r.required_by.isoformat(),
-            "clinical_reference": r.clinical_reference,
-            "status": r.status,
-        },
-        status=201,
-    )
+    return JsonResponse(_request_payload(r), status=201)
+
+
+def _request_payload(r):
+    return {
+        "id": r.pk,
+        "hospital": r.hospital,
+        "branch": r.branch.code,
+        "blood_group": r.blood_group,
+        "component": r.component,
+        "quantity": r.quantity,
+        "priority": r.priority,
+        "required_by": r.required_by.isoformat(),
+        "clinical_reference": r.clinical_reference,
+        "status": r.status,
+    }
 
 
 @login_required
@@ -1205,16 +1156,7 @@ def api_request_status(request, pk):
     if data is None:
         return api_error("invalid_json", "Request body must be valid JSON.", status=400)
 
-    raw_status = (data.get("status") or data.get("action") or "").strip().upper()
-    action_map = {
-        "APPROVE": BloodRequest.Status.APPROVED,
-        "APPROVED": BloodRequest.Status.APPROVED,
-        "REJECT": BloodRequest.Status.REJECTED,
-        "REJECTED": BloodRequest.Status.REJECTED,
-        "CANCEL": BloodRequest.Status.CANCELLED,
-        "CANCELLED": BloodRequest.Status.CANCELLED,
-    }
-    target = action_map.get(raw_status)
+    target = request_action_target(data.get("status") or data.get("action"))
     if not target:
         return api_error(
             "validation_error",
@@ -1225,7 +1167,7 @@ def api_request_status(request, pk):
 
     if target == BloodRequest.Status.CANCELLED:
         if role(request.user) == UserProfile.Role.HOSPITAL:
-            if r.created_by_id != request.user.id or r.status != BloodRequest.Status.PENDING:
+            if not allowed(request.user, {UserProfile.Role.HOSPITAL}) or not hospital_may_cancel(r, request.user):
                 deny(request.user, "Hospital staff attempted unauthorized API request cancellation")
                 return api_error("forbidden", "Hospital staff can cancel only their own Pending requests.", status=403)
         elif not allowed(request.user, STAFF):

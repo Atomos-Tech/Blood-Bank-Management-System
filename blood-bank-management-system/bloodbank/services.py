@@ -402,6 +402,40 @@ def cancel_appointment(appointment, user):
     return appointment
 
 
+def register_donor(donor, user, branch=None):
+    """FR-01: save a validated donor profile; operational staff register donors into their own branch."""
+    if branch is not None and donor.branch_id is None:
+        donor.branch = branch
+    donor.save()
+    audit(user, "DONOR_REGISTERED", donor,
+          summary="Consent captured; screening questionnaire completed", branch=donor.branch)
+    return donor
+
+
+def record_deferral(deferral, approver, branch=None):
+    """FR-08: the approving staff member always comes from the session, never from the form."""
+    deferral.approved_by = approver
+    deferral.save()
+    kind = "Permanent" if deferral.permanent else f"Temporary until {deferral.end_date}"
+    audit(approver, "DEFERRAL_RECORDED", deferral, summary=f"{kind}: {deferral.reason}",
+          branch=deferral.donor.branch or branch)
+    return deferral
+
+
+def save_configuration(form, user):
+    """FR-27 / FR-30: save one validated configuration form and audit what changed."""
+    creating = form.instance.pk is None
+    changed = ", ".join(form.changed_data) or "no fields"
+    record = form.save()
+    audit(
+        user,
+        "CONFIGURATION_CREATED" if creating else "CONFIGURATION_CHANGED",
+        record,
+        summary=f"{record._meta.verbose_name} {record}: {changed}",
+    )
+    return record
+
+
 def active_eligibility_rule():
     return EligibilityRule.objects.filter(active=True).order_by("id").first()
 
@@ -489,6 +523,68 @@ def transition_request(request, next_status, user):
         "Blood request status updated",
         f"Request {request.pk} is now {request.get_status_display()}.",
     )
+
+
+# FR-20: request actions by the names the web form ("approve") and the JSON API ("APPROVED") use.
+REQUEST_ACTIONS = {
+    "APPROVE": BloodRequest.Status.APPROVED,
+    "APPROVED": BloodRequest.Status.APPROVED,
+    "REJECT": BloodRequest.Status.REJECTED,
+    "REJECTED": BloodRequest.Status.REJECTED,
+    "CANCEL": BloodRequest.Status.CANCELLED,
+    "CANCELLED": BloodRequest.Status.CANCELLED,
+}
+
+
+def request_action_target(name):
+    """The request status an action name asks for, or None for an unknown action."""
+    return REQUEST_ACTIONS.get((name or "").strip().upper())
+
+
+def hospital_may_cancel(blood_request, user):
+    """FR-21: hospital staff may cancel only their own Pending request; once approved, only blood bank staff can."""
+    return blood_request.created_by_id == user.id and blood_request.status == BloodRequest.Status.PENDING
+
+
+class MissingHospitalAssignment(ValueError):
+    pass
+
+
+def find_idempotent_request(user, idempotency_key):
+    """SADS 8.2: a resubmission with the same Idempotency-Key returns the request already created."""
+    if not idempotency_key:
+        return None
+    return BloodRequest.objects.filter(idempotency_key=idempotency_key, created_by=user).first()
+
+
+def create_blood_request(blood_request, user, idempotency_key=None):
+    """FR-19: a new request starts Pending and is tied to the creating account's verified hospital."""
+    hospital = getattr(getattr(user, "profile", None), "hospital_name", "")
+    if not hospital:
+        raise MissingHospitalAssignment("Hospital staff account is missing its verified hospital assignment.")
+    blood_request.created_by = user
+    blood_request.hospital = hospital
+    blood_request.idempotency_key = idempotency_key
+    blood_request.status = BloodRequest.Status.PENDING
+    blood_request.save()
+    audit(user, "BLOOD_REQUEST_CREATED", blood_request, branch=blood_request.branch)
+    return blood_request
+
+
+CROSSMATCH_OUTCOMES = {"COMPATIBLE", "INCOMPATIBLE"}
+
+
+def record_crossmatch(reservation, outcome, user):
+    """FR-23: one cross-match per reservation, recorded or corrected only while the reservation is active."""
+    if outcome not in CROSSMATCH_OUTCOMES:
+        raise ValueError("Cross-match outcome must be Compatible or Incompatible.")
+    if not reservation.active:
+        raise ValueError("A cross-match can only be recorded for an active reservation.")
+    match, _ = CrossMatch.objects.update_or_create(
+        reservation=reservation, defaults={"outcome": outcome, "recorded_by": user}
+    )
+    audit(user, "CROSSMATCH_RECORDED", reservation, summary=outcome, branch=reservation.request.branch)
+    return match
 
 
 @transaction.atomic

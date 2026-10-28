@@ -56,9 +56,11 @@ The app follows the layered modular monolith in SADS section 3. Views call servi
 | Layer | Files | Responsibility |
 | :--- | :--- | :--- |
 | Presentation | `bloodbank/views.py`, `bloodbank/forms.py`, `bloodbank/templates/`, `bloodbank/urls.py` | HTTP handling, form validation, role and branch checks, role-specific pages and JSON API |
-| Business rules | `bloodbank/services.py` | Eligibility, donation recording and unit IDs, shelf-life expiry, the unit state machine (`transition_unit`), screening release and quarantine, request state machine, reservation, cross-match and issue, alerts, audit and notifications |
+| Business rules | `bloodbank/services.py` | Donor registration, eligibility, deferrals, appointment booking and capacity, donation recording and unit IDs, shelf-life expiry, the unit state machine (`transition_unit`), screening release and quarantine, blood request creation, the request state machine and cancellation rules, reservation, cross-match and issue, account and configuration changes, login lockout, alerts, audit and notifications |
 | Data access | `bloodbank/models.py`, `bloodbank/migrations/` | Django models, constraints, indexes and the append-only audit trail |
 | Infrastructure | `bloodbank/middleware.py`, `bloodbank/management/commands/`, `bbms/settings.py`, `docker-compose.yml`, `nginx.conf` | Branch time zones, scheduled jobs (`expire_units`, `check_alerts`), demo seeding, deployment |
+
+Views never write to the database themselves: every create, update or delete goes through a service, and `LayeredModuleTests` fails the build if `views.py` calls `.save()`, `.objects.create()`, `.update()` or `.delete()`.
 
 `bloodbank/tests.py` holds unit tests for the eligibility rules, every unit and request state transition and the screening outcomes, plus integration tests for each Test Plan case (`TC-F..`, `TC-S..`, `TC-N..`) named in the test class docstrings.
 

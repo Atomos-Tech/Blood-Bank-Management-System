@@ -83,6 +83,14 @@ from .services import (
     reserve_units,
     transition_request,
     transition_unit,
+    MissingHospitalAssignment,
+    create_blood_request,
+    find_idempotent_request,
+    hospital_may_cancel,
+    record_crossmatch,
+    record_deferral,
+    register_donor,
+    request_action_target,
 )
 
 
@@ -3798,3 +3806,122 @@ class BackupAndRestoreTests(TestCase):
                          "4 hours", "7", "4", "restore.sh", "Maintenance"]:
             with self.subTest(expected=expected):
                 self.assertIn(expected, docs)
+
+
+class LayeredModuleTests(TestCase):
+    """BB-45 [NFR-08]: presentation code delegates every write to the service layer."""
+
+    def test_views_never_write_to_the_database_directly(self):
+        source = (Path(__file__).resolve().parent / "views.py").read_text(encoding="utf-8")
+        for forbidden in [".objects.create(", ".update_or_create(", ".get_or_create(", ".save()", ".delete(", ".update("]:
+            self.assertNotIn(forbidden, source, f"views.py calls {forbidden}; move the write into services.py")
+
+
+class RequestAndCrossMatchServiceTests(TestCase):
+    """BB-45 [NFR-08]: unit tests for the request, cross-match, donor and deferral services moved out of views."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Service Branch", code="SVC")
+        self.staff = User.objects.create_user("svcstaff@bbms.test", email="svcstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.hospital = User.objects.create_user("svchosp@bbms.test", email="svchosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="Service Hospital"
+        )
+        self.other_hospital = User.objects.create_user("svchosp2@bbms.test", email="svchosp2@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.other_hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="Other Hospital"
+        )
+
+    def new_request(self):
+        return BloodRequest(
+            branch=self.branch,
+            blood_group="A+",
+            component="Plasma",
+            quantity=1,
+            priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1),
+            clinical_reference="REF-SVC",
+        )
+
+    def test_create_blood_request_ties_request_to_the_hospital_and_starts_pending(self):
+        r = create_blood_request(self.new_request(), self.hospital, "idem-svc-1")
+        r.refresh_from_db()
+        self.assertEqual((r.hospital, r.created_by, r.status), ("Service Hospital", self.hospital, "PENDING"))
+        self.assertEqual(find_idempotent_request(self.hospital, "idem-svc-1"), r)
+        self.assertIsNone(find_idempotent_request(self.other_hospital, "idem-svc-1"))
+        self.assertIsNone(find_idempotent_request(self.hospital, None))
+        self.assertTrue(AuditEvent.objects.filter(event_type="BLOOD_REQUEST_CREATED", record_id=str(r.pk)).exists())
+
+    def test_create_blood_request_requires_a_verified_hospital(self):
+        self.hospital.profile.hospital_name = ""
+        self.hospital.profile.save()
+        with self.assertRaises(MissingHospitalAssignment):
+            create_blood_request(self.new_request(), self.hospital)
+        self.assertEqual(BloodRequest.objects.count(), 0)
+
+    def test_hospital_may_cancel_only_its_own_pending_request(self):
+        r = create_blood_request(self.new_request(), self.hospital)
+        self.assertTrue(hospital_may_cancel(r, self.hospital))
+        self.assertFalse(hospital_may_cancel(r, self.other_hospital))
+        transition_request(r, BloodRequest.Status.APPROVED, self.staff)
+        self.assertFalse(hospital_may_cancel(r, self.hospital))
+
+    def test_request_action_names(self):
+        for name, status in [("approve", "APPROVED"), ("APPROVED", "APPROVED"), ("reject", "REJECTED"),
+                             (" cancel ", "CANCELLED"), ("CANCELLED", "CANCELLED")]:
+            self.assertEqual(request_action_target(name), status)
+        for name in ["", None, "fulfil", "delete"]:
+            self.assertIsNone(request_action_target(name))
+
+    def test_record_crossmatch_needs_active_reservation_and_known_outcome(self):
+        donor = Donor.objects.create(
+            branch=self.branch, full_name="Svc Donor", email="svcdonor@example.test", phone="9000000112",
+            date_of_birth=timezone.localdate() - timedelta(days=30 * 365), weight_kg=70, blood_group="A+",
+            consent_given=True,
+        )
+        donation = Donation.objects.create(
+            donation_id="DON-SVC-1", donor=donor, collected_at=timezone.now(), collector=self.staff, branch=self.branch
+        )
+        BloodUnit.objects.create(
+            unit_id="UNIT-SVC-1", donation=donation, blood_group="A+", component="Plasma", volume_ml=220,
+            expiry_at=timezone.now() + timedelta(days=30), branch=self.branch, status=BloodUnit.Status.AVAILABLE,
+        )
+        r = create_blood_request(self.new_request(), self.hospital)
+        transition_request(r, BloodRequest.Status.APPROVED, self.staff)
+        reservation = reserve_units(r, self.staff)[0]
+
+        with self.assertRaises(ValueError):
+            record_crossmatch(reservation, "MAYBE", self.staff)
+        record_crossmatch(reservation, "INCOMPATIBLE", self.staff)
+        match = record_crossmatch(reservation, "COMPATIBLE", self.staff)  # a correction replaces the outcome
+        self.assertEqual(CrossMatch.objects.get(reservation=reservation).outcome, "COMPATIBLE")
+        self.assertEqual(match.recorded_by, self.staff)
+
+        release_reservation(reservation, self.staff)
+        reservation.refresh_from_db()
+        with self.assertRaisesMessage(ValueError, "active reservation"):
+            record_crossmatch(reservation, "INCOMPATIBLE", self.staff)
+        self.assertEqual(CrossMatch.objects.get(reservation=reservation).outcome, "COMPATIBLE")
+
+    def test_register_donor_and_record_deferral(self):
+        donor = register_donor(
+            Donor(
+                full_name="Registered Donor", email="registered@example.test", phone="9000000113",
+                date_of_birth=timezone.localdate() - timedelta(days=30 * 365), weight_kg=70, blood_group="O-",
+                consent_given=True,
+            ),
+            self.staff,
+            branch=self.branch,
+        )
+        self.assertEqual(donor.branch, self.branch)
+        self.assertTrue(AuditEvent.objects.filter(event_type="DONOR_REGISTERED", record_id=str(donor.pk)).exists())
+
+        deferral = record_deferral(
+            Deferral(donor=donor, reason="Recent tattoo", end_date=timezone.localdate() + timedelta(days=90)),
+            self.staff,
+        )
+        self.assertEqual(deferral.approved_by, self.staff)
+        event = AuditEvent.objects.get(event_type="DEFERRAL_RECORDED")
+        self.assertIn("Recent tattoo", event.summary)
+        self.assertEqual(event.branch, self.branch)
