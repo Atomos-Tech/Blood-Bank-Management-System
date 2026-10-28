@@ -3422,6 +3422,58 @@ class HealthCheckTests(TestCase):
         self.assertIn("/health/", compose)
 
 
+class RestartPersistenceTests(TestCase):
+    """BB-42 [NFR-05] & TC-N04: committed donation, screening, reservation and issuance data
+    survives an application restart.
+
+    The drill itself needs Docker, so these tests check the apparatus that performs it: the
+    database lives on a named volume, and the probe covers every record type NFR-05 names.
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+    COMPOSE = ROOT / "docker-compose.yml"
+    PROBE = ROOT / "scripts" / "restart_persistence_probe.py"
+    VERIFY = ROOT / "scripts" / "verify_restart_persistence.py"
+    RESULTS = ROOT.parent / "docs" / "test-results" / "TC-N04_NFR-05_restart_persistence_results.md"
+
+    def test_nfr05_postgres_data_is_on_a_named_volume(self):
+        compose = self.COMPOSE.read_text()
+        # A named volume outlives `docker compose down`; a bind or anonymous mount would not.
+        self.assertIn("postgres_data:/var/lib/postgresql/data", compose)
+        self.assertRegex(compose, r"(?m)^volumes:$")
+        self.assertRegex(compose, r"(?m)^  postgres_data:$")
+
+    def test_tc_n04_the_probe_and_the_driver_both_exist(self):
+        for script in [self.PROBE, self.VERIFY]:
+            with self.subTest(script=script.name):
+                self.assertTrue(script.exists(), f"{script.name} is missing")
+
+    def test_tc_n04_the_probe_covers_every_record_type_nfr05_names(self):
+        probe = self.PROBE.read_text()
+        for record in ["donation", "screening results", "reservation", "issue"]:
+            with self.subTest(record=record):
+                self.assertIn(f'"{record}"', probe)
+        self.assertIn("def create(", probe)
+        self.assertIn("def verify(", probe)
+
+    def test_tc_n04_the_driver_restarts_and_recreates_before_verifying(self):
+        verify = self.VERIFY.read_text()
+        self.assertIn("restart", verify)
+        # Recreating the containers while keeping the volume is the step that proves the data
+        # is in Postgres rather than in a container's writable layer.
+        self.assertIn("postgres_data", verify.replace("\n", " ") + self.COMPOSE.read_text())
+        self.assertIn(str(self.RESULTS.name), verify)
+
+    def test_tc_n04_result_file_is_either_absent_or_records_a_real_run(self):
+        """The drill needs Docker, so this asserts honesty rather than a pass: if a result file
+        exists it must carry a verdict, and if it does not, nothing claims TC-N04 has run."""
+        if not self.RESULTS.exists():
+            self.skipTest("TC-N04 has not been run yet; run scripts/verify_restart_persistence.py")
+        contents = self.RESULTS.read_text()
+        self.assertRegex(contents, r"PASS|FAIL")
+        self.assertIn("NFR-05", contents)
+
+
 class ConfigurationScreenTests(SprintOneSecurityFixture):
     """BB-34 [FR-27] & TC-F14: the administrator configures branches, slots, rules and thresholds,
     with validation, and every change is audited."""

@@ -125,3 +125,52 @@ Anything older is deleted at the end of each run.
 
 > The drill has not been run yet. `scripts/restore.sh` prints the timing line that belongs in the
 > "Decrypt + restore time" column; until a drill is recorded here, `TC-N03` is not evidenced.
+
+---
+
+## 4. Restart persistence (`NFR-05`, `TC-N04`)
+
+**Requirement:** committed donation, screening, reservation and issuance records survive an
+application restart.
+
+PostgreSQL data lives on the **named volume** `postgres_data`. A named volume outlives
+`docker compose down`, so the records are not in a container's writable layer — which is the
+property `TC-N04` exists to prove.
+
+### Steps
+
+The whole drill is scripted. From `blood-bank-management-system/` on a host with Docker:
+
+```sh
+python scripts/verify_restart_persistence.py
+```
+
+It performs, verifying after every step:
+
+1. Start `db` and `web`, run migrations and `seed_demo`.
+2. Write a donation, screening results, a reservation and an issue
+   (`scripts/restart_persistence_probe.py create`, which prints a JSON manifest).
+3. **Restart** the `web` and `db` containers; verify the manifest.
+4. **Remove and recreate** both containers, keeping the `postgres_data` volume; verify again.
+
+It writes its verdict to `docs/test-results/TC-N04_NFR-05_restart_persistence_results.md`.
+
+To run the two halves by hand instead:
+
+```sh
+docker compose exec -T web python scripts/restart_persistence_probe.py create > manifest.json
+docker compose restart web db
+docker compose exec -T web python scripts/restart_persistence_probe.py verify "$(cat manifest.json)"
+```
+
+`verify` exits 0 only if every record is still present.
+
+### Drill results
+
+| Date | Step | Records verified | Result |
+| :--- | :--- | :--- | :--- |
+| _(to be filled by `verify_restart_persistence.py`)_ | | | |
+
+> Not run yet. `docs/test-results/TC-N04_NFR-05_restart_persistence_results.md` does not exist, so
+> `TC-N04` is not evidenced — the same honesty rule as `TC-N03` above. `RestartPersistenceTests`
+> checks the apparatus (named volume, probe coverage, driver steps) but cannot perform the restart.
