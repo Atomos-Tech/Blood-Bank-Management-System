@@ -2,14 +2,24 @@
 
 **Course:** `UE24CS341A` – Software Engineering  
 **Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
-**Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
+**Updated:** 29 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
-**Backlog:** 57 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
+**Backlog:** 58 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
 ## Still open
 
-- `BB-06` (#8) Complete documentation and the deviations log — Niyatee
 - `BB-05` (#7) Record and upload the 2-minute Sprint 2 demo video — Niyatee, Nishitha, Nikita
+
+## Evidence still to record
+
+The code and automated checks for these are complete; what is missing is a run that needs Docker, a browser the development machines could not launch, or a person. Each has a written procedure, and `scripts/record_test_results.py` picks up the result once it is recorded.
+
+| Test case | What is missing | Procedure | Backlog owner |
+| :--- | :--- | :--- | :--- |
+| TC-N03 | Encrypted backup restore drill with timing | `docs/operations.md` section 3 | `BB-41` / `BB-57` — Nishitha |
+| TC-N04 | Container restart and recreate drill | `docs/operations.md` section 4 (`scripts/verify_restart_persistence.py`) | `BB-42` — Nishitha |
+| TC-N05 | Firefox run (Chromium, Chrome and Edge pass) | `scripts/check_responsive_layout.py --browser firefox` on macOS or Linux; Windows blocks Playwright's Firefox build | `BB-43` — Nikita |
+| TC-N06 | Timed trial with a first-time user from outside the team | `docs/test-results/TC-N06_NFR-07_usability_trial.md` | `BB-44` — Nikita |
 
 ## Functional requirements
 
@@ -87,5 +97,5 @@
 | — | Automate PRs: labels, assignee, linked issue, templates, branch protection | `BB-03` (#5) | Nishitha | Sprint 1 | Complete | Process |
 | — | Record and upload the 1-minute Sprint 1 demo video | `BB-04` (#6) | Nikita | Sprint 1 | Complete | Process |
 | — | Record and upload the 2-minute Sprint 2 demo video | `BB-05` (#7) | Niyatee, Nishitha, Nikita | Sprint 2 | **Open** | Process |
-| — | Complete documentation and the deviations log | `BB-06` (#8) | Niyatee | Sprint 2 | **Open** | Process |
+| — | Complete documentation and the deviations log | `BB-06` (#8) | Niyatee | Sprint 2 | Complete | Process |
 | — | Freeze development and tag the v1.0 release | `BB-07` (#9) | Nishitha | Sprint 2 | Complete | Process |

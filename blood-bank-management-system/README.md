@@ -19,6 +19,14 @@ A Django academic implementation of the submitted Blood Bank Management System s
 - Five reports at `/reports/` — inventory, expiry, donations, blood requests and audit trail — filtered by date range and branch and downloadable as CSV. A hospital account sees only availability and its own requests; asking for another report by name is denied and audited.
 - `GET /health/` is unauthenticated and returns `200` while the application and database are up, `503` otherwise. It is what the `web` container healthcheck and the uptime monitor poll (`NFR-03`).
 - `scripts/backup.sh` and `scripts/restore.sh` take encrypted `pg_dump` backups (7 daily, 4 weekly) and restore one with timing. See [`docs/operations.md`](../docs/operations.md).
+- Donors see their donation history, appointment history and next eligibility date on **My donor record**.
+- Staff find a donor by name, phone, email or donor number on **Donors** and check in today's appointments from the search results or the **Today's appointments** list.
+- Appointment reminders go out 24 hours ahead and request-status emails on every request change; each email's delivery is recorded as `SENT` or `FAILED`.
+- A signed-in session ends after 15 minutes without a request, on logout, and at once when the account is deactivated.
+- Unit status changes follow the design's state machine: invalid moves are rejected and audited, units past expiry are marked Expired every 5 minutes, and staff can discard Quarantined or Expired units with a reason.
+- Pages show times in the branch's time zone while the database stores UTC.
+- The administrator sets record retention periods and exports donors, donations and the audit trail as CSV.
+- Every page works from 360 to 1440 px wide without horizontal scrolling.
 
 ## Sprint demos
 
