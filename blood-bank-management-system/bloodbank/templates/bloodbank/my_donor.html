@@ -1,1 +1,20 @@
-{% extends 'bloodbank/base.html' %}{% block title %}My donor record{% endblock %}{% block content %}<section class="panel"><h3>Eligibility</h3>{% if eligible %}<p class="message success">Eligible to book a donation appointment.</p><a class="primary" href="{% url 'appointments' %}">Book appointment</a>{% else %}<div class="eligibility-block" role="alert"><p class="error"><b>Not eligible to book yet.</b> Failed rules:</p><ul class="failed-rules">{% for reason in reasons %}<li>{{ reason }}</li>{% endfor %}</ul></div>{% endif %}</section><div class="grid2"><section class="panel"><h3>Appointments</h3>{% for ap in appointments %}<p>{{ ap.slot.branch }} · {{ ap.slot.starts_at }} · {{ ap.get_status_display }} {% if ap.status == 'BOOKED' %}<a class="action" href="{% url 'reschedule_appointment' ap.pk %}">Reschedule</a><form method="post" class="inline-form" action="{% url 'cancel_appointment' ap.pk %}">{% csrf_token %}<button class="action">Cancel</button></form>{% endif %}</p>{% empty %}<p>No appointments.</p>{% endfor %}</section><section class="panel"><h3>Donation history</h3>{% for d in donations %}<p>{{ d.donation_id }} · {{ d.collected_at }}</p>{% empty %}<p>No donations.</p>{% endfor %}</section></div>{% endblock %}
+{% extends 'bloodbank/base.html' %}{% block title %}My donor record{% endblock %}{% block content %}
+<div class="cards donor-cards">
+  <article class="metric"><p>NEXT ELIGIBLE DATE</p><strong class="next-date">{% if interval_pending %}{{ next_eligible_date|date:"d M Y" }}{% else %}Today{% endif %}</strong></article>
+  <article class="metric"><p>BLOOD GROUP</p><strong>{{ donor.blood_group }}</strong></article>
+  <article class="metric"><p>DONATIONS</p><strong>{{ donations|length }}</strong></article>
+  <article class="metric"><p>APPOINTMENTS</p><strong>{{ appointments|length }}</strong></article>
+</div>
+<section class="panel" style="margin-top:14px"><h3>Eligibility</h3>{% if eligible %}<p class="message success">Eligible to book a donation appointment.</p><a class="primary" href="{% url 'appointments' %}">Book appointment</a>{% else %}<div class="eligibility-block" role="alert"><p class="error"><b>Not eligible to book yet.</b> Failed rules:</p><ul class="failed-rules">{% for reason in reasons %}<li>{{ reason }}</li>{% endfor %}</ul></div>{% endif %}</section>
+<div class="grid2">
+<section class="panel history"><h3>Appointment history</h3>
+  <table><tr><th>Date and time</th><th>Branch</th><th>Status</th><th></th></tr>
+  {% for ap in appointments %}<tr><td>{{ ap.slot.starts_at|date:"d M Y, H:i" }}</td><td>{{ ap.slot.branch.name }}</td><td><span class="pill">{{ ap.get_status_display }}</span></td><td>{% if ap.status == 'BOOKED' %}<a class="action" href="{% url 'reschedule_appointment' ap.pk %}">Reschedule</a><form method="post" class="inline-form" action="{% url 'cancel_appointment' ap.pk %}">{% csrf_token %}<button class="action">Cancel</button></form>{% endif %}</td></tr>
+  {% empty %}<tr><td colspan="4">No appointments yet.</td></tr>{% endfor %}</table>
+</section>
+<section class="panel history"><h3>Donation history</h3>
+  <table><tr><th>Date</th><th>Donation</th><th>Type</th><th>Branch</th></tr>
+  {% for d in donations %}<tr><td>{{ d.collected_at|date:"d M Y" }}</td><td class="mono">{{ d.donation_id }}<br><small>{{ d.units.all|length }} component unit{{ d.units.all|length|pluralize }}</small></td><td>{{ d.get_donation_type_display }}</td><td>{{ d.branch.name }}</td></tr>
+  {% empty %}<tr><td colspan="4">No donations yet.</td></tr>{% endfor %}</table>
+</section>
+</div>{% endblock %}

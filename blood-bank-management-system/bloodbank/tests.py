@@ -4013,3 +4013,90 @@ class SessionExpiryAndInvalidationTests(SprintOneSecurityFixture):
         session.save()
         response = client.get("/inventory/", follow=True)
         self.assertContains(response, "Your session has ended. Please sign in again.")
+
+
+class DonorHistoryAccessTests(TestCase):
+    """BB-14 [FR-07] / TC-F04: a donor sees their own donations and appointments newest first and
+    their next eligibility date, and cannot open another donor's record."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="History Branch", code="HIST")
+        EligibilityRule.objects.create(
+            min_age=18, max_age=65, min_weight_kg=50,
+            minimum_interval_days=90, platelets_interval_days=14, plasma_interval_days=28,
+        )
+        ShelfLifeRule.objects.create(component="Packed Red Cells", days=35)
+        self.staff = User.objects.create_user("histstaff@bbms.test", email="histstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.donor_a = self.make_donor("hist-a", "History Donor A")
+        self.donor_b = self.make_donor("hist-b", "History Donor B")
+        now = timezone.now()
+        self.old = Donation.objects.create(
+            donation_id="DON-HIST-OLD", donor=self.donor_a, collected_at=now - timedelta(days=200),
+            collector=self.staff, branch=self.branch,
+        )
+        self.recent = Donation.objects.create(
+            donation_id="DON-HIST-NEW", donor=self.donor_a, collected_at=now - timedelta(days=10),
+            collector=self.staff, branch=self.branch,
+        )
+        Donation.objects.create(
+            donation_id="DON-HIST-OTHER", donor=self.donor_b, collected_at=now - timedelta(days=5),
+            collector=self.staff, branch=self.branch,
+        )
+        early = AppointmentSlot.objects.create(branch=self.branch, starts_at=now - timedelta(days=11), capacity=3)
+        late = AppointmentSlot.objects.create(branch=self.branch, starts_at=now + timedelta(days=100), capacity=3)
+        Appointment.objects.create(donor=self.donor_a, slot=early)
+        Appointment.objects.create(donor=self.donor_a, slot=late)
+        Appointment.objects.create(donor=self.donor_b, slot=late)
+        self.client.force_login(self.donor_a.user)
+
+    def make_donor(self, key, name):
+        user = User.objects.create_user(f"{key}@bbms.test", email=f"{key}@bbms.test", password="pw")
+        UserProfile.objects.create(user=user, role=UserProfile.Role.DONOR, branch=self.branch)
+        return Donor.objects.create(
+            user=user, branch=self.branch, full_name=name, email=f"{key}@bbms.test", phone="9000000123",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="O+", consent_given=True,
+        )
+
+    def test_tc_f04_donations_and_appointments_newest_first(self):
+        response = self.client.get("/my-record/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([d.donation_id for d in response.context["donations"]], ["DON-HIST-NEW", "DON-HIST-OLD"])
+        starts = [ap.slot.starts_at for ap in response.context["appointments"]]
+        self.assertEqual(starts, sorted(starts, reverse=True))
+        self.assertEqual(len(starts), 2)
+
+    def test_tc_f04_next_eligibility_date_uses_last_donation_and_interval(self):
+        response = self.client.get("/my-record/")
+        expected = timezone.localdate(self.recent.collected_at) + timedelta(days=90)
+        self.assertEqual(response.context["next_eligible_date"], expected)
+        self.assertTrue(response.context["interval_pending"])
+        self.assertContains(response, expected.strftime("%d %b %Y"))
+
+    def test_next_eligibility_date_is_today_once_interval_has_passed(self):
+        Donation.objects.filter(donor=self.donor_a).update(collected_at=timezone.now() - timedelta(days=200))
+        response = self.client.get("/my-record/")
+        self.assertFalse(response.context["interval_pending"])
+        self.assertEqual(response.context["next_eligible_date"], timezone.localdate())
+
+    def test_tc_f04_other_donor_record_is_denied_and_logged(self):
+        response = self.client.get(f"/my-record/?donor={self.donor_b.pk}")
+        self.assertEqual(response.status_code, 403)
+        self.assertNotContains(response, "DON-HIST-OTHER", status_code=403)
+        event = AuditEvent.objects.get(event_type="UNAUTHORIZED_ACCESS")
+        self.assertEqual(event.actor, self.donor_a.user)
+        self.assertEqual(event.outcome, "DENIED")
+
+    def test_own_record_never_lists_another_donors_rows(self):
+        response = self.client.get("/my-record/")
+        self.assertNotContains(response, "DON-HIST-OTHER")
+        self.assertTrue(all(ap.donor_id == self.donor_a.pk for ap in response.context["appointments"]))
+
+    def test_non_donor_roles_cannot_open_the_donor_portal(self):
+        self.client.force_login(self.staff)
+        self.assertEqual(self.client.get("/my-record/").status_code, 403)
+
+    def test_recording_a_donation_updates_the_stored_eligibility_date(self):
+        record_donation(self.donor_b, self.branch, self.staff, "O+", {"Packed Red Cells": 350})
+        self.donor_b.refresh_from_db()
+        self.assertEqual(self.donor_b.eligibility_date, timezone.localdate() + timedelta(days=90))

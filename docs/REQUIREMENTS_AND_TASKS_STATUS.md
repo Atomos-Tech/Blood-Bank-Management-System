@@ -4,7 +4,7 @@
 **Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
 **Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
-**Backlog:** 52 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
+**Backlog:** 53 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
 ## Still open
 
@@ -12,7 +12,6 @@
 - `BB-44` (#46) First-time staff finish donor lookup and check-in in 5 minutes — Nikita
 - `BB-43` (#45) Works on current browsers from 360 to 1440 px — Nikita
 - `BB-36` (#38) Send appointment reminders and request-status emails — Nikita
-- `BB-14` (#16) Show donor donation history, appointments and eligibility date — Nikita
 - `BB-06` (#8) Complete documentation and the deviations log — Niyatee
 - `BB-05` (#7) Record and upload the 2-minute Sprint 2 demo video — Niyatee, Nishitha, Nikita
 
@@ -26,7 +25,7 @@
 | FR-04 | Show every failed eligibility rule and block confirmation | `BB-11` (#13) | Nikita | Sprint 1 | Complete | TC-F02 |
 | FR-05 | Create, reschedule and cancel an appointment | `BB-12` (#14) | Nikita | Sprint 1 | Complete | TC-F03 |
 | FR-06 | Prevent slot capacity from being exceeded | `BB-13` (#15) | Nikita | Sprint 1 | Complete | TC-F03 |
-| FR-07 | Show donor donation history, appointments and eligibility date | `BB-14` (#16) | Nikita | Sprint 2 | **Open** | TC-F04 |
+| FR-07 | Show donor donation history, appointments and eligibility date | `BB-14` (#16) | Nikita | Sprint 2 | Complete | TC-F04 |
 | FR-08 | Record temporary or permanent donor deferrals | `BB-15` (#17) | Nikita | Sprint 1 | Complete | TC-F05 |
 | FR-09 | Assign unique donation and blood unit identifiers | `BB-16` (#18) | Niyatee | Sprint 1 | Complete | TC-F06 |
 | FR-10 | Record collection details for each blood unit | `BB-17` (#19) | Niyatee | Sprint 0 (dry run) | Complete | TC-F06 |

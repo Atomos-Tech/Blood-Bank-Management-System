@@ -27,7 +27,7 @@ from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR
                        register_donor, request_action_target, save_configuration,
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
                        check_stock_and_expiry_alerts, clear_login_failures, create_account,
-                       discard_unit, eligibility, end_user_sessions,
+                       discard_unit, donor_history, eligibility, end_user_sessions,
                        expire_units, record_donation, record_lab_result, record_login_failure,
                        get_branch_warnings, issue_reservation, release_reservation,
                        release_screened_unit, reserve_units, set_account_active, transition_request)
@@ -287,13 +287,7 @@ def my_donor_record(request):
     return render(
         request,
         "bloodbank/my_donor.html",
-        {
-            "donor": donor,
-            "eligible": ok,
-            "reasons": reasons,
-            "appointments": donor.appointments.select_related("slot", "slot__branch").order_by("-slot__starts_at"),
-            "donations": donor.donations.order_by("-collected_at"),
-        },
+        {"donor": donor, "eligible": ok, "reasons": reasons, **donor_history(donor)},
     )
 
 

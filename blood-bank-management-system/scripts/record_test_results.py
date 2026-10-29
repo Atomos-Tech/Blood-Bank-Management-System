@@ -93,7 +93,6 @@ DRILLS = {
 }
 # Cases still waiting on an open backlog item; listed so a gap is visible rather than silently missing.
 OPEN_ITEMS = {
-    "TC-F04": "BB-14 (#16)",
     "TC-F16": "BB-36 (#38)",
     "TC-N05": "BB-43 (#45)",
     "TC-N06": "BB-44 (#46)",

@@ -318,6 +318,9 @@ def record_donation(donor, branch, collector, blood_group, components, collected
                     summary=", ".join(u.unit_id for u in units),
                     branch=branch,
                 )
+                # FR-07: keep the stored next-eligibility date current for the staff donor list.
+                donor.eligibility_date = next_eligible_date(donor)
+                donor.save(update_fields=["eligibility_date"])
             return donation, units
         except IntegrityError:
             if attempt == 4:
@@ -450,6 +453,19 @@ def next_eligible_date(donor, rule=None):
         for d in donor.donations.all()
     ]
     return max(dates) if dates else None
+
+
+def donor_history(donor):
+    """FR-07: what the donor portal shows - donations and appointments newest first and the date the
+    donor may next give. Only this donor's own rows are ever read."""
+    next_date = next_eligible_date(donor)
+    today = timezone.localdate()
+    return {
+        "donations": donor.donations.select_related("branch").prefetch_related("units").order_by("-collected_at"),
+        "appointments": donor.appointments.select_related("slot__branch").order_by("-slot__starts_at", "-pk"),
+        "next_eligible_date": next_date if next_date and next_date > today else today,
+        "interval_pending": bool(next_date and next_date > today),
+    }
 
 
 def eligibility(donor):
