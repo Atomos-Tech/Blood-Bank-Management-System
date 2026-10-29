@@ -24,3 +24,11 @@ a.primary,a.action,a.quiet{display:inline-block;text-decoration:none}a.primary:h
 .brand,.brand:visited{color:var(--ink)}.nav{display:block;border-left:2px solid transparent}.nav.active{background:#182331;color:#fff;border-left-color:var(--accent)}
 @media(max-width:850px){.nav{border-left:0;border-bottom:2px solid transparent;border-radius:6px 6px 0 0}.nav.active{border-bottom-color:var(--accent)}}
 :focus-visible{outline:2px solid var(--a2);outline-offset:2px}
+
+/* Flash messages as banners instead of plain text. */
+.message{display:flex;align-items:center;gap:10px;margin:0 0 16px;padding:12px 16px;border-radius:9px;border:1px solid #2c3d4f;background:#132030;color:#d7e4ef;font-weight:600}
+.message::before{content:'i';display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;background:#26394c;font:700 .8rem 'DM Mono'}
+.message.success{background:#10291f;border-color:#1f5a43;color:#a8f0d6}.message.success::before{content:'\2713';background:#1f5a43}
+.message.error{background:#2a1419;border-color:#5a2a35;color:#ffc4ce}.message.error::before{content:'!';background:#5a2a35}
+.message.warning{background:#2b2412;border-color:#5c4a1c;color:#ffe2a0}.message.warning::before{content:'!';background:#5c4a1c}
+.login-card .error{grid-column:1/-1;background:#2a1419;border:1px solid #5a2a35;border-radius:8px;padding:10px 14px;color:#ffc4ce;font-size:.9rem;max-width:680px}
