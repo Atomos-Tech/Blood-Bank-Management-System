@@ -1,0 +1,119 @@
+{
+  "browser": "Edge",
+  "engine": "chromium",
+  "channel": "msedge",
+  "version": "156.0.4314.50",
+  "run_at": "2026-10-29 08:40 UTC",
+  "base_url": "http://127.0.0.1:8000",
+  "pass": true,
+  "checks": [
+    {
+      "form": "registration",
+      "width": 360,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/360-registration.png",
+      "pass": true
+    },
+    {
+      "form": "inventory-search",
+      "width": 360,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/360-inventory-search.png",
+      "pass": true
+    },
+    {
+      "form": "appointment",
+      "width": 360,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/360-appointment.png",
+      "pass": true
+    },
+    {
+      "form": "blood-request",
+      "width": 360,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/360-blood-request.png",
+      "pass": true
+    },
+    {
+      "form": "registration",
+      "width": 768,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/768-registration.png",
+      "pass": true
+    },
+    {
+      "form": "inventory-search",
+      "width": 768,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/768-inventory-search.png",
+      "pass": true
+    },
+    {
+      "form": "appointment",
+      "width": 768,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/768-appointment.png",
+      "pass": true
+    },
+    {
+      "form": "blood-request",
+      "width": 768,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/768-blood-request.png",
+      "pass": true
+    },
+    {
+      "form": "registration",
+      "width": 1440,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/1440-registration.png",
+      "pass": true
+    },
+    {
+      "form": "inventory-search",
+      "width": 1440,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/1440-inventory-search.png",
+      "pass": true
+    },
+    {
+      "form": "appointment",
+      "width": 1440,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/1440-appointment.png",
+      "pass": true
+    },
+    {
+      "form": "blood-request",
+      "width": 1440,
+      "no_horizontal_scroll": true,
+      "unlabelled_controls": [],
+      "submission_ok": true,
+      "screenshot": "docs/test-results/TC-N05/edge/1440-blood-request.png",
+      "pass": true
+    }
+  ]
+}

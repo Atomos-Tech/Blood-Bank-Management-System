@@ -101,7 +101,10 @@ def _responsive_layout():
         return "Pass", "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
     if "FAIL" in text.split("**Result:**", 1)[1].split("\n", 1)[0] or "— FAIL" in text:
         return "Fail", "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
-    return "Pass in Chromium (Firefox, Chrome and Edge runs pending)", "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
+    passed = re.findall(r"^## (\w+) .* — PASS$", text, re.M)
+    missing = re.search(r"^Still to record: (.+?)\.", text, re.M)
+    status = f"Pass in {', '.join(passed)}" + (f" ({missing.group(1)} run pending)" if missing else "")
+    return status, "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
 
 
 DRILLS = {
