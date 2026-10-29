@@ -4306,3 +4306,56 @@ class DonorLookupAndCheckInTests(TestCase):
         text = trial.read_text(encoding="utf-8")
         self.assertIn("within **5 minutes**", text)
         self.assertIn("Task card", text)
+
+
+class ResponsiveLayoutTests(TestCase):
+    """BB-43 [NFR-06] / TC-N05: the stylesheet and templates keep standard forms usable from 360 to
+    1440 px. The browser run itself is scripts/check_responsive_layout.py, recorded in
+    docs/test-results/TC-N05_NFR-06_responsive_layout_results.md."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    CSS = ROOT / "static" / "style.css"
+    TEMPLATES = Path(__file__).resolve().parent / "templates" / "bloodbank"
+
+    def test_every_page_sets_the_mobile_viewport(self):
+        for name in ("base.html", "login.html"):
+            with self.subTest(template=name):
+                self.assertIn('name="viewport" content="width=device-width,initial-scale=1"',
+                              (self.TEMPLATES / name).read_text())
+
+    def test_stylesheet_has_tablet_and_phone_breakpoints_without_page_overflow(self):
+        css = self.CSS.read_text()
+        self.assertIn("@media(max-width:850px)", css)
+        self.assertIn("@media(max-width:520px)", css)
+        self.assertIn("grid-template-columns:minmax(0,1fr)", css)
+        self.assertIn(".panel{min-width:0;overflow-x:auto}", css)
+
+    def test_sign_out_stays_reachable_on_small_screens(self):
+        base = (self.TEMPLATES / "base.html").read_text()
+        self.assertIn('class="mobile-signout"', base)
+        self.assertIn(".mobile-signout{display:block", self.CSS.read_text())
+
+    def test_inventory_filters_have_accessible_labels(self):
+        html = (self.TEMPLATES / "inventory.html").read_text()
+        for label in ("Blood group", "Component", "Branch", "Expires before"):
+            self.assertIn(f'aria-label="{label}"', html)
+
+    def test_donor_is_not_offered_a_slot_they_already_hold(self):
+        branch = Branch.objects.create(name="Resp Branch", code="RESP")
+        donor = Donor.objects.create(
+            branch=branch, full_name="Resp Donor", email="resp@example.test", phone="9000000444",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="A+", consent_given=True,
+        )
+        held = AppointmentSlot.objects.create(branch=branch, starts_at=timezone.now() + timedelta(days=2), capacity=5)
+        free = AppointmentSlot.objects.create(branch=branch, starts_at=timezone.now() + timedelta(days=3), capacity=5)
+        Appointment.objects.create(donor=donor, slot=held)
+        from .forms import AppointmentForm
+        self.assertEqual(list(AppointmentForm(donor=donor).fields["slot"].queryset), [free])
+
+    def test_browser_run_is_recorded(self):
+        report = self.ROOT.parent / "docs" / "test-results" / "TC-N05_NFR-06_responsive_layout_results.md"
+        text = report.read_text(encoding="utf-8")
+        self.assertIn("| 360 px |", text)
+        self.assertIn("| 1440 px |", text)
+        self.assertNotIn("**No**", text)
+        self.assertNotIn("**Failed**", text)

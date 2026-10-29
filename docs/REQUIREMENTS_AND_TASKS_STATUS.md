@@ -4,12 +4,11 @@
 **Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
 **Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
-**Backlog:** 55 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
+**Backlog:** 56 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
 ## Still open
 
 - `BB-49` (#51) Configurable record retention and export — Nikita
-- `BB-43` (#45) Works on current browsers from 360 to 1440 px — Nikita
 - `BB-06` (#8) Complete documentation and the deviations log — Niyatee
 - `BB-05` (#7) Record and upload the 2-minute Sprint 2 demo video — Niyatee, Nishitha, Nikita
 
@@ -57,7 +56,7 @@
 | NFR-03 | Support 99.0 percent monthly availability | `BB-40` (#42) | Nishitha | Sprint 2 | Complete | TC-N03 |
 | NFR-04 | Daily encrypted backups with tested restore | `BB-41` (#43) | Nishitha | Sprint 2 | Complete | TC-N03 |
 | NFR-05 | Committed data survives an application restart | `BB-42` (#44) | Nishitha | Sprint 1 | Complete | TC-N04 |
-| NFR-06 | Works on current browsers from 360 to 1440 px | `BB-43` (#45) | Nikita | Sprint 2 | **Open** | TC-N05 |
+| NFR-06 | Works on current browsers from 360 to 1440 px | `BB-43` (#45) | Nikita | Sprint 2 | Complete | TC-N05 |
 | NFR-07 | First-time staff finish donor lookup and check-in in 5 minutes | `BB-44` (#46) | Nikita | Sprint 2 | Complete | TC-N06 |
 | NFR-08 | Layered modules with unit tests for state rules | `BB-45` (#47) | Niyatee | Sprint 2 | Complete | Code review + unit tests |
 | NFR-09 | Branch-level access restrictions for operational users | `BB-46` (#48) | Nimay | Sprint 2 | Complete | TC-S02 |

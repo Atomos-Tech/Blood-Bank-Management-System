@@ -357,7 +357,7 @@ def appointment_view(request):
     if not donor:
         return redirect("donors")
     branch, filter_form = _slot_branch_filter(request)
-    form = AppointmentForm(request.POST or None, branch=branch)
+    form = AppointmentForm(request.POST or None, branch=branch, donor=donor)
     # FR-04: evaluate every rule up front so the donor sees all failures before trying to book.
     ok, reasons = eligibility(donor)
     if request.method == "POST" and form.is_valid():
@@ -413,7 +413,7 @@ def reschedule_appointment_view(request, pk):
         messages.error(request, "Only a booked appointment can be rescheduled.")
         return _after_appointment(request)
     branch, filter_form = _slot_branch_filter(request)
-    form = AppointmentForm(request.POST or None, branch=branch, exclude_slot=ap.slot)
+    form = AppointmentForm(request.POST or None, branch=branch, exclude_slot=ap.slot, donor=ap.donor)
     ok, reasons = eligibility(ap.donor)
     if request.method == "POST" and form.is_valid():
         slot = form.cleaned_data["slot"]

@@ -92,16 +92,28 @@ def _usability_trial():
     return "See trial record", "`docs/test-results/TC-N06_NFR-07_usability_trial.md`"
 
 
+def _responsive_layout():
+    report = REPO / "docs" / "test-results" / "TC-N05_NFR-06_responsive_layout_results.md"
+    if not report.exists():
+        return "Not executed (browser run pending)", "`scripts/check_responsive_layout.py` not yet run"
+    text = report.read_text(encoding="utf-8")
+    if "**Result:** PASS" in text:
+        return "Pass", "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
+    if "FAIL" in text.split("**Result:**", 1)[1].split("\n", 1)[0] or "— FAIL" in text:
+        return "Fail", "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
+    return "Pass in Chromium (Firefox, Chrome and Edge runs pending)", "`docs/test-results/TC-N05_NFR-06_responsive_layout_results.md`"
+
+
 DRILLS = {
     "TC-N01": lambda: _benchmark("TC-N01_NFR-01_load_test_results.md"),
     "TC-N02": lambda: _benchmark("TC-N02_NFR-02_reservation_concurrency_results.md"),
     "TC-N03": _restore_drill,
     "TC-N04": _restart_drill,
+    "TC-N05": _responsive_layout,
     "TC-N06": _usability_trial,
 }
 # Cases still waiting on an open backlog item; listed so a gap is visible rather than silently missing.
 OPEN_ITEMS = {
-    "TC-N05": "BB-43 (#45)",
 }
 CASE_PATTERN = re.compile(r"TC-[FSN]\d\d")
 METHOD_PATTERN = re.compile(r"tc_([fsn])(\d\d)")

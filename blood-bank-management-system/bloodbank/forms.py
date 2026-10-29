@@ -121,7 +121,7 @@ class AppointmentForm(forms.Form):
 
     slot = SlotChoiceField(queryset=AppointmentSlot.objects.none(), empty_label="Select a time slot")
 
-    def __init__(self, *args, branch=None, exclude_slot=None, **kwargs):
+    def __init__(self, *args, branch=None, exclude_slot=None, donor=None, **kwargs):
         super().__init__(*args, **kwargs)
         slots = (
             AppointmentSlot.objects.select_related("branch")
@@ -135,6 +135,9 @@ class AppointmentForm(forms.Form):
             slots = slots.filter(branch=branch)
         if exclude_slot is not None:
             slots = slots.exclude(pk=exclude_slot.pk)
+        if donor is not None:
+            # A slot the donor already holds is not offered again.
+            slots = slots.exclude(appointments__donor=donor, appointments__status__in=Appointment.ACTIVE_STATUSES)
         self.fields["slot"].queryset = slots
 
 
