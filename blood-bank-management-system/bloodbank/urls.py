@@ -35,6 +35,8 @@ urlpatterns = [
     path("configuration/", views.configuration, name="configuration"),
     path("configuration/<str:section>/", views.configuration_save, name="configuration_save"),
     path("reports/", views.reports, name="reports"),
+    # NFR-12: administrator CSV exports for archiving under the retention policy.
+    path("exports/<str:kind>.csv", views.export_csv, name="export_csv"),
     # SADS Section 8.2 REST API endpoints for Inventory & Request Service (FR-17 to FR-24)
     path("api/v1/inventory", views.api_inventory, name="api_inventory_noslash"),
     path("api/v1/inventory/", views.api_inventory, name="api_inventory"),

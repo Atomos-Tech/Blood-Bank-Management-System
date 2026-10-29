@@ -94,6 +94,8 @@ Views never write to the database themselves: every create, update or delete goe
 
 `python3 manage.py send_reminders` emails every donor whose booked appointment starts within the next 24 hours and records each email as `SENT` or `FAILED` in `Notification` (FR-29). A reminder is sent once per appointment; a failed one is retried on the next run. The `reminders` service in `docker-compose.yml` runs it every 15 minutes (`send_reminders --every 900`); for a local install use cron, for example `*/15 * * * * python3 manage.py send_reminders`. Request-status emails go out whenever a request changes state. Set `BBMS_EMAIL_BACKEND` (and Django's `EMAIL_HOST` settings) to send real email; the default keeps messages in memory.
 
+`python3 manage.py retention_report` lists, for each record type, how many records are older than the retention period set on **Configuration → Record retention** (NFR-12). The administrator exports donors, donations and the audit trail as CSV from the same screen. The policy and procedure are in [`docs/operations.md`](../docs/operations.md) section 5.
+
 ## Deployment truthfulness
 
 `docker-compose.yml` specifies the documented PostgreSQL and Gunicorn deployment shape. It is a deployment template, not evidence that a production container, HTTPS reverse proxy, backup schedule, 100-user load test, browser compatibility matrix, or institutional compliance review has been executed. Before a real deployment, set a strong `BBMS_SECRET_KEY`, set `BBMS_DEBUG=0`, enable TLS and `BBMS_SECURE_SSL=1`, change all demo credentials, configure authenticated SMTP, configure encrypted backup storage/retention, and execute the complete acceptance test plan.

@@ -12,7 +12,7 @@ from django.core.mail import send_mail
 from django.utils import timezone
 from .models import (COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation, DonationType, Donor,
                      EligibilityRule, Issue, LabResult, Notification, Reservation, RequestTransition,
-                     ShelfLifeRule, TestType, UserProfile)
+                     RetentionPolicy, ShelfLifeRule, TestType, UserProfile)
 
 
 def audit_reference(user, event_type, record_type, record_id, outcome="SUCCESS", summary="", branch=None):
@@ -953,3 +953,76 @@ def check_stock_and_expiry_alerts(branch=None):
             if not Notification.objects.filter(recipient=recipient, subject=item["subject"]).exists():
                 sent.append(notify(recipient, item["subject"], item["message"]))
     return sent
+
+
+# NFR-12: the date each record type's retention period runs from.
+RETENTION_SOURCES = {
+    RetentionPolicy.RecordType.DONOR: (Donor, "created_at"),
+    RetentionPolicy.RecordType.DONATION: (Donation, "collected_at"),
+    RetentionPolicy.RecordType.BLOOD_REQUEST: (BloodRequest, "created_at"),
+    RetentionPolicy.RecordType.AUDIT_EVENT: (AuditEvent, "created_at"),
+    RetentionPolicy.RecordType.NOTIFICATION: (Notification, "created_at"),
+}
+
+
+def retention_report(now=None):
+    """NFR-12: for each configured policy, how many records are older than their retention period and
+    due for review. Nothing is deleted here: clinical and audit records are archived through the
+    export below and disposed of under the institution's procedure (docs/operations.md section 5)."""
+    now = now or timezone.now()
+    rows = []
+    for policy in RetentionPolicy.objects.all():
+        model, field = RETENTION_SOURCES[policy.record_type]
+        cutoff = now - timedelta(days=policy.retention_days)
+        due = model.objects.filter(**{f"{field}__lt": cutoff}).count()
+        rows.append({"policy": policy, "cutoff": cutoff, "due": due, "total": model.objects.count()})
+    return rows
+
+
+# NFR-12 / SEC-09: the columns each administrator export contains. Donor medical history and screening
+# answers are left out because the administrator has no routine access to them (SRS Table 4).
+EXPORTS = {
+    "donors": (
+        "Donor profiles",
+        ["donor_id", "full_name", "email", "phone", "date_of_birth", "blood_group", "branch",
+         "consent_given", "eligibility_date", "created_at"],
+        lambda: Donor.objects.select_related("branch").order_by("pk"),
+        lambda d: [d.pk, d.full_name, d.email, d.phone, d.date_of_birth, d.blood_group,
+                   getattr(d.branch, "code", ""), d.consent_given, d.eligibility_date or "", d.created_at.isoformat()],
+    ),
+    "donations": (
+        "Donations and component units",
+        ["donation_id", "donor_id", "collected_at", "donation_type", "branch", "collector", "unit_ids"],
+        lambda: Donation.objects.select_related("branch", "collector").prefetch_related("units").order_by("pk"),
+        lambda d: [d.donation_id, d.donor_id, d.collected_at.isoformat(), d.donation_type, d.branch.code,
+                   d.collector.username, " ".join(u.unit_id for u in d.units.all())],
+    ),
+    "audit": (
+        "Audit events",
+        ["created_at_utc", "actor", "event_type", "record_type", "record_id", "outcome", "branch", "summary"],
+        lambda: AuditEvent.objects.select_related("actor", "branch").order_by("created_at", "pk"),
+        lambda e: [e.created_at.isoformat(), getattr(e.actor, "username", "System"), e.event_type, e.record_type,
+                   e.record_id, e.outcome, getattr(e.branch, "code", ""), e.summary],
+    ),
+}
+
+
+def _csv_safe(value):
+    """Stop a spreadsheet from running a stored value as a formula (CSV injection)."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@") else text
+
+
+def export_records(kind, user, stream):
+    """NFR-12: write one record type as CSV to `stream` for an administrator and audit the export."""
+    import csv
+
+    title, header, rows, to_row = EXPORTS[kind]
+    writer = csv.writer(stream)
+    writer.writerow(header)
+    count = 0
+    for record in rows():
+        writer.writerow([_csv_safe(v) for v in to_row(record)])
+        count += 1
+    audit_reference(user, "RECORDS_EXPORTED", "Export", kind, summary=f"{title}: {count} row(s) as CSV")
+    return count

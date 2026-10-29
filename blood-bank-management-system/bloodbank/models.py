@@ -247,3 +247,26 @@ class Notification(models.Model):
     status = models.CharField(max_length=16, default="PENDING")
     created_at = models.DateTimeField(auto_now_add=True)
     sent_at = models.DateTimeField(null=True, blank=True)
+
+
+class RetentionPolicy(models.Model):
+    """NFR-12: how long each kind of record is kept before it is reviewed for archive or disposal.
+    The values are set by the administrator to match the institution's approved policy."""
+
+    class RecordType(models.TextChoices):
+        DONOR = "DONOR", "Donor profiles"
+        DONATION = "DONATION", "Donations and component units"
+        BLOOD_REQUEST = "BLOOD_REQUEST", "Blood requests and issues"
+        AUDIT_EVENT = "AUDIT_EVENT", "Audit events"
+        NOTIFICATION = "NOTIFICATION", "Email notifications"
+
+    record_type = models.CharField(max_length=20, choices=RecordType.choices, unique=True)
+    retention_days = models.PositiveIntegerField(validators=[MinValueValidator(30)])
+    notes = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["record_type"]
+        verbose_name = "retention policy"
+        verbose_name_plural = "retention policies"
+
+    def __str__(self): return f"{self.get_record_type_display()}: {self.retention_days} days"

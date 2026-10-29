@@ -13,11 +13,11 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_http_methods, require_POST
-from .forms import (DonorSearchForm, AppointmentForm, AppointmentSlotForm, BloodRequestForm, BranchConfigForm,
+from .forms import (DonorSearchForm, RetentionPolicyForm, AppointmentForm, AppointmentSlotForm, BloodRequestForm, BranchConfigForm,
                     BranchFilterForm, CrossMatchForm, DeferralForm,
                     DonorForm, DonationForm, EligibilityRuleForm, LabResultForm, ReportFilterForm,
                     ShelfLifeRuleForm, UserAccountForm, UserRoleForm)
-from .models import (Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
+from .models import (RetentionPolicy, Appointment, AppointmentSlot, AuditEvent, BloodRequest, BloodUnit, Branch,
                      CrossMatch, Deferral, Donation, Donor, EligibilityRule, Issue, LabResult,
                      Notification, Reservation, ShelfLifeRule, TestType, UserProfile)
 from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR, LastAdministrator,
@@ -28,7 +28,7 @@ from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
                        check_stock_and_expiry_alerts, clear_login_failures, create_account,
                        check_in_appointment, discard_unit, donor_history, eligibility, end_user_sessions,
-                       find_donors, todays_appointments,
+                       find_donors, todays_appointments, EXPORTS, export_records, retention_report,
                        expire_units, record_donation, record_lab_result, record_login_failure,
                        get_branch_warnings, issue_reservation, release_reservation,
                        release_screened_unit, reserve_units, set_account_active, transition_request)
@@ -854,6 +854,7 @@ CONFIG_SECTIONS = {
     "eligibility": (EligibilityRuleForm, EligibilityRule),
     "shelf-life": (ShelfLifeRuleForm, ShelfLifeRule),
     "slot": (AppointmentSlotForm, AppointmentSlot),
+    "retention": (RetentionPolicyForm, RetentionPolicy),
 }
 
 
@@ -885,8 +886,28 @@ def _configuration_page(request, invalid=None):
             "slots": AppointmentSlot.objects.select_related("branch").filter(
                 starts_at__gt=timezone.now()
             ).order_by("starts_at")[:20],
+            "retention_rows": [
+                (row, form_for("retention", row["policy"].pk, RetentionPolicyForm, row["policy"],
+                               f"retention-{row['policy'].pk}"))
+                for row in retention_report()
+            ],
+            "exports": [(kind, title) for kind, (title, *_rest) in EXPORTS.items()],
         },
     )
+
+
+@login_required
+@require_http_methods(["GET"])
+def export_csv(request, kind):
+    """NFR-12: CSV export of donor, donation and audit records for the System Administrator."""
+    if not allowed(request.user, ADMIN):
+        return deny(request.user, f"Record export denied: {kind}")
+    if kind not in EXPORTS:
+        return deny(request.user, f"Unknown export {kind}")
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="bbms-{kind}-{timezone.now():%Y%m%d}.csv"'
+    export_records(kind, request.user, response)
+    return response
 
 
 @login_required
@@ -918,6 +939,9 @@ def configuration_save(request, section):
         prefix = f"shelf-{instance.pk}"
     elif section == "eligibility":
         instance = active_eligibility_rule()
+    elif section == "retention":
+        instance = get_object_or_404(RetentionPolicy, pk=pk)
+        prefix = f"retention-{instance.pk}"
 
     form = form_class(request.POST, instance=instance, prefix=prefix) if instance is not None \
         else form_class(request.POST)

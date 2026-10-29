@@ -7,7 +7,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
-from .models import (BLOOD_GROUPS, COMPONENT_CODES, DonationType, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
+from .models import (RetentionPolicy, BLOOD_GROUPS, COMPONENT_CODES, DonationType, SCREENING_QUESTIONS, Appointment, AppointmentSlot, BloodRequest, BloodUnit, Branch, Deferral, Donor,
                      EligibilityRule, LabResult, Reservation, ShelfLifeRule, UserProfile)
 
 
@@ -376,6 +376,15 @@ class EligibilityRuleForm(forms.ModelForm):
             if value is not None and value < 1:
                 self.add_error(field, "A donation interval must be at least one day.")
         return cleaned
+
+
+class RetentionPolicyForm(forms.ModelForm):
+    """NFR-12: retention period for one record type, set to the institution's approved policy."""
+
+    class Meta:
+        model = RetentionPolicy
+        fields = ["retention_days", "notes"]
+        labels = {"retention_days": "Keep for (days)", "notes": "Policy reference"}
 
 
 class ShelfLifeRuleForm(forms.ModelForm):

@@ -4,11 +4,10 @@
 **Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
 **Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
-**Backlog:** 56 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
+**Backlog:** 57 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
 ## Still open
 
-- `BB-49` (#51) Configurable record retention and export — Nikita
 - `BB-06` (#8) Complete documentation and the deviations log — Niyatee
 - `BB-05` (#7) Record and upload the 2-minute Sprint 2 demo video — Niyatee, Nishitha, Nikita
 
@@ -62,7 +61,7 @@
 | NFR-09 | Branch-level access restrictions for operational users | `BB-46` (#48) | Nimay | Sprint 2 | Complete | TC-S02 |
 | NFR-10 | Store UTC and display branch local time | `BB-47` (#49) | Niyatee | Sprint 2 | Complete | TC-N07 |
 | NFR-11 | Hide medical and screening data from search and hospital reports | `BB-48` (#50) | Nimay | Sprint 1 | Complete | TC-S04 |
-| NFR-12 | Configurable record retention and export | `BB-49` (#51) | Nikita | Sprint 2 | **Open** | Configuration inspection |
+| NFR-12 | Configurable record retention and export | `BB-49` (#51) | Nikita | Sprint 2 | Complete | Configuration inspection |
 
 ## Security requirements
 

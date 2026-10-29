@@ -26,6 +26,7 @@ from django.utils import timezone
 from . import urls as bloodbank_urls
 
 from .models import (
+    RetentionPolicy,
     SCREENING_QUESTIONS,
     Appointment,
     AppointmentSlot,
@@ -50,6 +51,7 @@ from .models import (
     UserProfile,
 )
 from .services import (
+    retention_report,
     check_in_appointment,
     send_appointment_reminders,
     AppointmentError,
@@ -4359,3 +4361,90 @@ class ResponsiveLayoutTests(TestCase):
         self.assertIn("| 1440 px |", text)
         self.assertNotIn("**No**", text)
         self.assertNotIn("**Failed**", text)
+
+
+class RecordRetentionAndExportTests(SprintOneSecurityFixture):
+    """BB-49 [NFR-12]: configurable retention per record type and administrator CSV export of donor,
+    donation and audit records. Verified by inspection (docs/operations.md section 5)."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = self.users["ADMIN"]
+        self.staff = self.users["STAFF"]
+        self.donor = Donor.objects.create(
+            branch=self.branch, full_name='=HYPERLINK("x")', email="export@example.test", phone="9000000555",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="B+",
+            medical_history="Private hepatitis note", consent_given=True,
+        )
+        Donation.objects.create(
+            donation_id="DON-EXPORT-1", donor=self.donor, collected_at=timezone.now() - timedelta(days=400),
+            collector=self.staff, branch=self.branch,
+        )
+        self.client.force_login(self.admin)
+
+    def csv_rows(self, kind):
+        response = self.client.get(f"/exports/{kind}.csv")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("attachment;", response["Content-Disposition"])
+        return list(csv.reader(io.StringIO(response.content.decode("utf-8"))))
+
+    def test_every_record_type_has_a_retention_policy(self):
+        types = set(RetentionPolicy.objects.values_list("record_type", flat=True))
+        self.assertEqual(types, set(RetentionPolicy.RecordType.values))
+
+    def test_administrator_changes_a_retention_period_and_it_is_audited(self):
+        policy = RetentionPolicy.objects.get(record_type="NOTIFICATION")
+        response = self.client.post("/configuration/retention/", {
+            "pk": policy.pk, f"retention-{policy.pk}-retention_days": "730",
+            f"retention-{policy.pk}-notes": "Policy BB-REC-7, section 4",
+        })
+        self.assertRedirects(response, "/configuration/")
+        policy.refresh_from_db()
+        self.assertEqual(policy.retention_days, 730)
+        self.assertTrue(AuditEvent.objects.filter(event_type="CONFIGURATION_CHANGED", record_type="RetentionPolicy").exists())
+
+    def test_retention_period_below_thirty_days_is_rejected(self):
+        policy = RetentionPolicy.objects.get(record_type="DONOR")
+        self.client.post("/configuration/retention/", {"pk": policy.pk, f"retention-{policy.pk}-retention_days": "5"})
+        policy.refresh_from_db()
+        self.assertEqual(policy.retention_days, 3650)
+
+    def test_records_past_their_period_are_reported_not_deleted(self):
+        RetentionPolicy.objects.filter(record_type="DONATION").update(retention_days=365)
+        row = next(r for r in retention_report() if r["policy"].record_type == "DONATION")
+        self.assertEqual((row["due"], row["total"]), (1, 1))
+        self.assertTrue(Donation.objects.filter(donation_id="DON-EXPORT-1").exists())
+        out = StringIO()
+        call_command("retention_report", stdout=out)
+        self.assertIn("Donations and component units: keep 365 days; 1 of 1", out.getvalue())
+        self.assertContains(self.client.get("/configuration/"), "1 of 1 record older than 365 days")
+
+    def test_donor_export_omits_medical_details_and_neutralises_formulas(self):
+        rows = self.csv_rows("donors")
+        self.assertEqual(rows[0][:3], ["donor_id", "full_name", "email"])
+        self.assertNotIn("medical_history", rows[0])
+        self.assertNotIn("Private hepatitis note", str(rows))
+        self.assertEqual(rows[1][1], '\'=HYPERLINK("x")')
+
+    def test_donation_and_audit_exports(self):
+        self.assertEqual(self.csv_rows("donations")[1][0], "DON-EXPORT-1")
+        audit_rows = self.csv_rows("audit")
+        self.assertEqual(audit_rows[0][2], "event_type")
+        event = AuditEvent.objects.filter(event_type="RECORDS_EXPORTED").latest("created_at")
+        self.assertEqual(event.actor, self.admin)
+        self.assertIn("row(s) as CSV", event.summary)
+
+    def test_only_the_administrator_can_export(self):
+        for role in ("STAFF", "HOSPITAL", "DONOR"):
+            self.client.force_login(self.users[role])
+            with self.subTest(role=role):
+                self.assertEqual(self.client.get("/exports/donors.csv").status_code, 403)
+        self.assertFalse(AuditEvent.objects.filter(event_type="RECORDS_EXPORTED").exists())
+
+    def test_unknown_export_is_denied(self):
+        self.assertEqual(self.client.get("/exports/passwords.csv").status_code, 403)
+
+    def test_policy_is_documented_for_inspection(self):
+        ops = (Path(__file__).resolve().parent.parent.parent / "docs" / "operations.md").read_text(encoding="utf-8")
+        self.assertIn("## 5. Record retention and export (`NFR-12`)", ops)

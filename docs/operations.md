@@ -174,3 +174,41 @@ docker compose exec -T web python scripts/restart_persistence_probe.py verify "$
 > Not run yet. `docs/test-results/TC-N04_NFR-05_restart_persistence_results.md` does not exist, so
 > `TC-N04` is not evidenced — the same honesty rule as `TC-N03` above. `RestartPersistenceTests`
 > checks the apparatus (named volume, probe coverage, driver steps) but cannot perform the restart.
+
+## 5. Record retention and export (`NFR-12`)
+
+NFR-12 asks for retention and export rules configured to match the institution's approved record-retention policy. The application holds the settings and produces the exports; the policy itself (the periods, and who approves disposal) belongs to the blood bank and its regulator.
+
+### Settings
+
+The System Administrator sets a retention period for each record type on **Configuration → Record retention**. Every change is audited as `CONFIGURATION_CHANGED`. The migration `0011` loads these starting values, which must be replaced with the approved policy before go-live:
+
+| Record type | Period runs from | Starting value | Why it starts there |
+| :--- | :--- | :--- | :--- |
+| Donor profiles | Profile creation | 3650 days (10 years) | Donor traceability for transfused components |
+| Donations and component units | Collection time | 3650 days | Look-back if a donor later tests reactive |
+| Blood requests and issues | Request creation | 3650 days | Links each issued unit to the requesting hospital |
+| Audit events | Event time | 3650 days | Security and regulatory review |
+| Email notifications | Send attempt | 365 days | Delivery evidence only |
+
+The minimum allowed period is 30 days.
+
+### Review and disposal
+
+- The Configuration screen shows, for each record type, how many records are older than their period. `python manage.py retention_report` prints the same list, for example from a monthly cron job.
+- Nothing is deleted by the application. Clinical records are linked to one another (donor → donation → unit → issue), and audit events cannot be changed or deleted in the app (`SEC-07`). Records past their period are exported, archived and then disposed of under the institution's written procedure, with the approval recorded outside the system.
+
+### Export
+
+The administrator downloads CSV files from **Configuration → Export records**: donor profiles, donations with their component unit IDs, and the audit trail (`/exports/donors.csv`, `/exports/donations.csv`, `/exports/audit.csv`).
+
+- Only the System Administrator can export; any other role gets 403 and an `UNAUTHORIZED_ACCESS` audit event.
+- Every export is audited as `RECORDS_EXPORTED` with the row count.
+- Donor exports leave out medical history and screening answers, which the administrator has no routine access to (`SEC-09`).
+- Values that a spreadsheet would run as a formula (starting with `=`, `+`, `-` or `@`) are prefixed with `'`.
+
+### Inspection record
+
+| Date | Inspected by | Settings match the approved policy? | Notes |
+| :--- | :--- | :--- | :--- |
+| _(to be filled when the approved policy is entered)_ | | | |
