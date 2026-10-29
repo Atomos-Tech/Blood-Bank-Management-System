@@ -32,3 +32,14 @@ a.primary,a.action,a.quiet{display:inline-block;text-decoration:none}a.primary:h
 .message.error{background:#2a1419;border-color:#5a2a35;color:#ffc4ce}.message.error::before{content:'!';background:#5a2a35}
 .message.warning{background:#2b2412;border-color:#5c4a1c;color:#ffe2a0}.message.warning::before{content:'!';background:#5c4a1c}
 .login-card .error{grid-column:1/-1;background:#2a1419;border:1px solid #5a2a35;border-radius:8px;padding:10px 14px;color:#ffc4ce;font-size:.9rem;max-width:680px}
+
+/* Status colours: templates use the stored status values (AVAILABLE, PENDING, ...), which the original
+   label-based classes (Available, Pending) never matched, so every pill rendered grey. */
+.pill.AVAILABLE,.pill.FULFILLED,.pill.CHECKED_IN,.pill.ISSUED{background:#153b38;color:#7cf1d9}
+.pill.TESTING,.pill.COLLECTED,.pill.PENDING,.pill.PARTIAL,.pill.BOOKED{background:#42381d;color:#ffd677}
+.pill.APPROVED,.pill.RESERVED{background:#1d3150;color:#9cc3ff}
+.pill.QUARANTINED,.pill.REJECTED,.pill.EXPIRED{background:#48212a;color:#ff9ca9}
+.pill.DISCARDED,.pill.CANCELLED{background:#262d36;color:#8e99aa}
+/* Dashboard activity feed: compact rows with a coloured rule instead of large gaps. */
+p.activity{display:block;margin:0;padding:9px 0 9px 12px;border-left:2px solid var(--a2)}p.activity+p.activity{border-top:1px solid #1d2a38}p.activity b{font-size:.82rem;letter-spacing:.02em}
+.panel p.error{background:#2a1419;border:1px solid #5a2a35;border-radius:8px;padding:9px 12px;margin:0 0 8px}

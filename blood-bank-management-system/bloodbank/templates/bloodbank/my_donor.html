@@ -9,7 +9,7 @@
 <div class="grid2">
 <section class="panel history"><h3>Appointment history</h3>
   <table><tr><th>Date and time</th><th>Branch</th><th>Status</th><th></th></tr>
-  {% for ap in appointments %}<tr><td>{{ ap.slot.starts_at|date:"d M Y, H:i" }}</td><td>{{ ap.slot.branch.name }}</td><td><span class="pill">{{ ap.get_status_display }}</span></td><td>{% if ap.status == 'BOOKED' %}<a class="action" href="{% url 'reschedule_appointment' ap.pk %}">Reschedule</a><form method="post" class="inline-form" action="{% url 'cancel_appointment' ap.pk %}">{% csrf_token %}<button class="action">Cancel</button></form>{% endif %}</td></tr>
+  {% for ap in appointments %}<tr><td>{{ ap.slot.starts_at|date:"d M Y, H:i" }}</td><td>{{ ap.slot.branch.name }}</td><td><span class="pill {{ ap.status }}">{{ ap.get_status_display }}</span></td><td>{% if ap.status == 'BOOKED' %}<a class="action" href="{% url 'reschedule_appointment' ap.pk %}">Reschedule</a><form method="post" class="inline-form" action="{% url 'cancel_appointment' ap.pk %}">{% csrf_token %}<button class="action">Cancel</button></form>{% endif %}</td></tr>
   {% empty %}<tr><td colspan="4">No appointments yet.</td></tr>{% endfor %}</table>
 </section>
 <section class="panel history"><h3>Donation history</h3>
