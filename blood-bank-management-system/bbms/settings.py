@@ -12,8 +12,9 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware", "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware", "django.middleware.csrf.CsrfViewMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware", "bloodbank.middleware.BranchTimezoneMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware", "django.contrib.messages.middleware.MessageMiddleware",
+    # SEC-04: idle timeout and deactivated-account sign-out, after authentication and messages.
+    "bloodbank.middleware.SessionSecurityMiddleware", "bloodbank.middleware.BranchTimezoneMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 ROOT_URLCONF = "bbms.urls"
@@ -56,8 +57,12 @@ CACHES = {
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
+# SEC-04: 15 minutes of inactivity ends a session. The cookie and the stored session expire 900 s
+# after the last request (SESSION_SAVE_EVERY_REQUEST slides the window), and
+# SessionSecurityMiddleware enforces the same limit on the server with its own timestamp.
 SESSION_COOKIE_AGE = 900
 SESSION_SAVE_EVERY_REQUEST = True
+BBMS_IDLE_TIMEOUT_SECONDS = 900
 CSRF_COOKIE_HTTPONLY = True
 SECURE_SSL_REDIRECT = os.environ.get("BBMS_SECURE_SSL", "0") == "1"
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

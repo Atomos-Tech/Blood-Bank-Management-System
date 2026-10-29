@@ -1980,8 +1980,14 @@ class RolePermissionMatrixTests(TestCase):
         staff.profile.active = False
         staff.profile.save()
         self.client.force_login(staff)
-        self.assertEqual(self.client.get("/inventory/").status_code, 403)
-        self.assertEqual(self.client.post(f"/requests/{self.pending.pk}/approve/").status_code, 403)
+        # SEC-04: a deactivated account is signed out on its next request instead of seeing 403s.
+        self.assertRedirects(self.client.get("/inventory/"), "/login/", fetch_redirect_response=False)
+        self.client.force_login(staff)
+        self.assertRedirects(
+            self.client.post(f"/requests/{self.pending.pk}/approve/"), "/login/", fetch_redirect_response=False
+        )
+        self.pending.refresh_from_db()
+        self.assertEqual(self.pending.status, BloodRequest.Status.PENDING)
 
 
 class BranchTimezoneDisplayTests(TestCase):
@@ -3925,3 +3931,85 @@ class RequestAndCrossMatchServiceTests(TestCase):
         event = AuditEvent.objects.get(event_type="DEFERRAL_RECORDED")
         self.assertIn("Recent tattoo", event.summary)
         self.assertEqual(event.branch, self.branch)
+
+
+class SessionExpiryAndInvalidationTests(SprintOneSecurityFixture):
+    """BB-53 [SEC-04] / TC-S05: idle sessions expire after 15 minutes; logout and deactivation end
+    every session the account holds."""
+
+    def setUp(self):
+        super().setUp()
+        self.staff = self.users["STAFF"]
+        self.admin = self.users["ADMIN"]
+
+    def signed_in_client(self, user):
+        client = Client()
+        self.assertEqual(self.sign_in(user, client=client).status_code, 302)
+        self.assertEqual(client.get("/").status_code, 200)
+        return client
+
+    def assert_signed_out(self, client):
+        response = client.get("/inventory/")
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response["Location"].startswith("/login/"))
+
+    def test_session_lifetime_is_fifteen_minutes_and_slides(self):
+        self.assertEqual(settings.SESSION_COOKIE_AGE, 900)
+        self.assertTrue(settings.SESSION_SAVE_EVERY_REQUEST)
+        self.assertEqual(settings.BBMS_IDLE_TIMEOUT_SECONDS, 900)
+
+    def test_tc_s05_session_expires_after_fifteen_idle_minutes(self):
+        client = self.signed_in_client(self.staff)
+        session = client.session
+        session["bbms_last_activity"] = int((timezone.now() - timedelta(minutes=16)).timestamp())
+        session.save()
+        self.assert_signed_out(client)
+        event = AuditEvent.objects.filter(event_type="SESSION_ENDED").latest("created_at")
+        self.assertEqual(event.actor, self.staff)
+        self.assertIn("Idle for more than 15 minutes", event.summary)
+
+    def test_activity_within_fifteen_minutes_keeps_the_session(self):
+        client = self.signed_in_client(self.staff)
+        session = client.session
+        session["bbms_last_activity"] = int((timezone.now() - timedelta(minutes=14)).timestamp())
+        session.save()
+        self.assertEqual(client.get("/inventory/").status_code, 200)
+        self.assertGreater(client.session["bbms_last_activity"], timezone.now().timestamp() - 60)
+
+    def test_tc_s05_logout_ends_every_session_of_the_user(self):
+        laptop = self.signed_in_client(self.staff)
+        phone = self.signed_in_client(self.staff)
+        other_user = self.signed_in_client(self.users["HOSPITAL"])
+        laptop.post("/logout/")
+        self.assert_signed_out(laptop)
+        self.assert_signed_out(phone)
+        self.assertEqual(other_user.get("/requests/").status_code, 200)
+        event = AuditEvent.objects.filter(event_type="LOGOUT").latest("created_at")
+        self.assertIn("1 other session(s) ended", event.summary)
+
+    def test_tc_s05_deactivation_ends_every_session(self):
+        laptop = self.signed_in_client(self.staff)
+        phone = self.signed_in_client(self.staff)
+        admin = self.signed_in_client(self.admin)
+        response = admin.post(f"/accounts/{self.staff.profile.pk}/status/", {"active": "0"})
+        self.assertIn(response.status_code, (200, 302))
+        self.staff.profile.refresh_from_db()
+        self.assertFalse(self.staff.profile.active)
+        self.assert_signed_out(laptop)
+        self.assert_signed_out(phone)
+
+    def test_deactivation_outside_the_account_screen_still_signs_the_user_out(self):
+        client = self.signed_in_client(self.staff)
+        UserProfile.objects.filter(pk=self.staff.profile.pk).update(active=False)
+        self.assert_signed_out(client)
+        self.assertTrue(
+            AuditEvent.objects.filter(event_type="SESSION_ENDED", summary="Account is deactivated").exists()
+        )
+
+    def test_signed_out_user_sees_a_neutral_message(self):
+        client = self.signed_in_client(self.staff)
+        session = client.session
+        session["bbms_last_activity"] = int((timezone.now() - timedelta(hours=1)).timestamp())
+        session.save()
+        response = client.get("/inventory/", follow=True)
+        self.assertContains(response, "Your session has ended. Please sign in again.")

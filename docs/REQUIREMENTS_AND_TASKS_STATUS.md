@@ -4,11 +4,10 @@
 **Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
 **Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
-**Backlog:** 51 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
+**Backlog:** 52 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
 ## Still open
 
-- `BB-53` (#55) Expire idle sessions and invalidate on logout or deactivation — Nikita
 - `BB-49` (#51) Configurable record retention and export — Nikita
 - `BB-44` (#46) First-time staff finish donor lookup and check-in in 5 minutes — Nikita
 - `BB-43` (#45) Works on current browsers from 360 to 1440 px — Nikita
@@ -76,7 +75,7 @@
 | SEC-01 | Server-side authorization on every protected action | `BB-50` (#52) | Niyatee | Sprint 1 | Complete | TC-S02 |
 | SEC-02 | Adaptive password hashing and no plain-text passwords | `BB-51` (#53) | Nishitha | Sprint 1 | Complete | TC-S01 |
 | SEC-03 | Lock account for 15 minutes after 5 failed logins | `BB-52` (#54) | Nishitha | Sprint 1 | Complete | TC-S01 |
-| SEC-04 | Expire idle sessions and invalidate on logout or deactivation | `BB-53` (#55) | Nikita | Sprint 2 | **Open** | TC-S05 |
+| SEC-04 | Expire idle sessions and invalidate on logout or deactivation | `BB-53` (#55) | Nikita | Sprint 2 | Complete | TC-S05 |
 | SEC-05 | HTTPS only in production | `BB-54` (#56) | Nimay | Sprint 2 | Complete | Configuration inspection |
 | SEC-06 | CSRF protection and input validation and encoding | `BB-55` (#57) | Nikita | Sprint 1 | Complete | TC-S06 |
 | SEC-07 | Complete, tamper-resistant audit records | `BB-56` (#58) | Niyatee | Sprint 1 | Complete | TC-S03 |

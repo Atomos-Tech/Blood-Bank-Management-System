@@ -106,9 +106,9 @@ class LastAdministrator(ValueError):
 
 
 def end_user_sessions(user):
-    """FR-26: an account that has just been deactivated loses its open sessions at once instead
-    of staying signed in until they expire. Deleting through the configured session store clears
-    both the database row and the cached copy."""
+    """FR-26 / SEC-04: an account that has just been deactivated, or that signs out, loses all of its
+    open sessions at once instead of staying signed in elsewhere until they expire. Deleting through
+    the configured session store clears both the database row and the cached copy."""
     store = import_module(settings.SESSION_ENGINE).SessionStore
     ended = 0
     for session in Session.objects.filter(expire_date__gte=timezone.now()):

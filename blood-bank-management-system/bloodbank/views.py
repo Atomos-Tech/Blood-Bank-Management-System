@@ -27,7 +27,7 @@ from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR
                        register_donor, request_action_target, save_configuration,
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
                        check_stock_and_expiry_alerts, clear_login_failures, create_account,
-                       discard_unit, eligibility,
+                       discard_unit, eligibility, end_user_sessions,
                        expire_units, record_donation, record_lab_result, record_login_failure,
                        get_branch_warnings, issue_reservation, release_reservation,
                        release_screened_unit, reserve_units, set_account_active, transition_request)
@@ -185,7 +185,12 @@ def login_view(request):
 @require_POST
 def logout_view(request):
     if request.user.is_authenticated:
-        audit(request.user, "LOGOUT", request.user, summary="Authenticated session ended")
+        # SEC-04: signing out ends every session the account holds, not just this browser's.
+        others = max(end_user_sessions(request.user) - 1, 0)
+        audit(
+            request.user, "LOGOUT", request.user,
+            summary="Authenticated session ended" + (f"; {others} other session(s) ended" if others else ""),
+        )
     logout(request)
     return redirect("login")
 
