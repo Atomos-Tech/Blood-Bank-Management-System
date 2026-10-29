@@ -4,14 +4,13 @@
 **Baseline documents:** `phase1/1_Software_Requirements_Specification`, `phase1/2_Software_Test_Plan`, `phase1/3_Software_Architecture_and_Design_Specification`  
 **Updated:** 28 Oct 2026 for `BB-06` from the live GitHub backlog. This replaces the 26 Oct audit, whose "Partial" entries (FR-14, FR-16, NFR-08, NFR-10, SEC-01, SEC-07 and others) have since been completed.
 
-**Backlog:** 53 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
+**Backlog:** 54 of 59 items complete. Test case results: [`test-results/TEST_EXECUTION_RESULTS.md`](test-results/TEST_EXECUTION_RESULTS.md). Every difference from the baseline documents: [`deviations.md`](deviations.md).
 
 ## Still open
 
 - `BB-49` (#51) Configurable record retention and export — Nikita
 - `BB-44` (#46) First-time staff finish donor lookup and check-in in 5 minutes — Nikita
 - `BB-43` (#45) Works on current browsers from 360 to 1440 px — Nikita
-- `BB-36` (#38) Send appointment reminders and request-status emails — Nikita
 - `BB-06` (#8) Complete documentation and the deviations log — Niyatee
 - `BB-05` (#7) Record and upload the 2-minute Sprint 2 demo video — Niyatee, Nishitha, Nikita
 
@@ -47,7 +46,7 @@
 | FR-26 | Administrator manages user accounts and roles | `BB-33` (#35) | Nishitha | Sprint 1 | Complete | TC-S02 |
 | FR-27 | Administrator configures branches, slots, rules and thresholds | `BB-34` (#36) | Nishitha | Sprint 2 | Complete | TC-F14 |
 | FR-28 | Generate reports by date range and branch | `BB-35` (#37) | Nishitha | Sprint 2 | Complete | TC-F15 |
-| FR-29 | Send appointment reminders and request-status emails | `BB-36` (#38) | Nikita | Sprint 2 | **Open** | TC-F16 |
+| FR-29 | Send appointment reminders and request-status emails | `BB-36` (#38) | Nikita | Sprint 2 | Complete | TC-F16 |
 | FR-30 | Write audit events for all security-relevant actions | `BB-37` (#39) | Nishitha | Sprint 1 | Complete | TC-S03 |
 
 ## Non-functional requirements

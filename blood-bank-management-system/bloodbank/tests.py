@@ -5,6 +5,7 @@ import io
 from io import StringIO
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -49,6 +50,7 @@ from .models import (
     UserProfile,
 )
 from .services import (
+    send_appointment_reminders,
     AppointmentError,
     GENERIC_LOGIN_ERROR,
     LOGIN_FAILURE_LIMIT,
@@ -3431,7 +3433,10 @@ class HealthCheckTests(TestCase):
 
     def test_nfr03_every_compose_service_restarts_itself_and_the_app_is_health_checked(self):
         compose = self.COMPOSE.read_text()
-        self.assertEqual(compose.count("restart: unless-stopped"), 5)
+        services_block = compose.split("services:\n", 1)[1].split("\nvolumes:", 1)[0]
+        services = re.findall(r"(?m)^  [a-z_]+:$", services_block)
+        self.assertGreaterEqual(len(services), 5)
+        self.assertEqual(compose.count("restart: unless-stopped"), len(services))
         self.assertIn("pg_isready", compose)
         self.assertIn("/health/", compose)
 
@@ -4100,3 +4105,103 @@ class DonorHistoryAccessTests(TestCase):
         record_donation(self.donor_b, self.branch, self.staff, "O+", {"Packed Red Cells": 350})
         self.donor_b.refresh_from_db()
         self.assertEqual(self.donor_b.eligibility_date, timezone.localdate() + timedelta(days=90))
+
+
+class AppointmentReminderAndRequestEmailTests(TestCase):
+    """BB-36 [FR-29] / TC-F16: reminders 24 hours before an appointment and request-status emails,
+    each recorded as SENT or FAILED."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Notify Branch", code="NOTE")
+        self.staff = User.objects.create_user("notestaff@bbms.test", email="notestaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.hospital = User.objects.create_user("notehosp@bbms.test", email="notehosp@bbms.test", password="pw")
+        UserProfile.objects.create(
+            user=self.hospital, role=UserProfile.Role.HOSPITAL, branch=self.branch, hospital_name="Notify Hospital"
+        )
+        self.donor = Donor.objects.create(
+            branch=self.branch, full_name="Reminder Donor", email="remind@example.test", phone="9000000321",
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, blood_group="A+", consent_given=True,
+        )
+        now = timezone.now()
+        self.soon = Appointment.objects.create(
+            donor=self.donor,
+            slot=AppointmentSlot.objects.create(branch=self.branch, starts_at=now + timedelta(hours=20), capacity=5),
+        )
+        self.later = Appointment.objects.create(
+            donor=self.donor,
+            slot=AppointmentSlot.objects.create(branch=self.branch, starts_at=now + timedelta(hours=30), capacity=5),
+        )
+        self.cancelled = Appointment.objects.create(
+            donor=self.donor, status=Appointment.Status.CANCELLED,
+            slot=AppointmentSlot.objects.create(branch=self.branch, starts_at=now + timedelta(hours=5), capacity=5),
+        )
+
+    def reminders(self):
+        return Notification.objects.filter(subject__startswith="Reminder:")
+
+    def test_tc_f16_reminder_sent_for_appointments_within_24_hours_only(self):
+        from django.core import mail
+        sent, failed = send_appointment_reminders()
+        self.assertEqual((sent, failed), (1, 0))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["remind@example.test"])
+        note = self.reminders().get()
+        self.assertEqual(note.status, "SENT")
+        self.assertIsNotNone(note.sent_at)
+        self.soon.refresh_from_db()
+        self.later.refresh_from_db()
+        self.assertIsNotNone(self.soon.reminder_sent_at)
+        self.assertIsNone(self.later.reminder_sent_at)
+        self.assertTrue(AuditEvent.objects.filter(event_type="APPOINTMENT_REMINDER", outcome="SUCCESS").exists())
+
+    def test_reminder_is_sent_only_once(self):
+        send_appointment_reminders()
+        self.assertEqual(send_appointment_reminders(), (0, 0))
+        self.assertEqual(self.reminders().count(), 1)
+
+    def test_later_appointment_is_reminded_once_it_enters_the_window(self):
+        send_appointment_reminders()
+        send_appointment_reminders(now=timezone.now() + timedelta(hours=8))
+        self.later.refresh_from_db()
+        self.assertIsNotNone(self.later.reminder_sent_at)
+        self.assertEqual(self.reminders().count(), 2)
+
+    def test_tc_f16_failed_reminder_is_recorded_and_retried(self):
+        with patch("bloodbank.services.send_mail", side_effect=OSError("SMTP down")):
+            self.assertEqual(send_appointment_reminders(), (0, 1))
+        self.assertEqual(self.reminders().get().status, "FAILED")
+        self.soon.refresh_from_db()
+        self.assertIsNone(self.soon.reminder_sent_at)
+        self.assertTrue(AuditEvent.objects.filter(event_type="APPOINTMENT_REMINDER", outcome="FAILED").exists())
+        self.assertEqual(send_appointment_reminders(), (1, 0))
+        self.assertEqual(list(self.reminders().order_by("pk").values_list("status", flat=True)), ["FAILED", "SENT"])
+
+    def test_management_command_runs_once(self):
+        out = StringIO()
+        call_command("send_reminders", stdout=out)
+        self.assertIn("1 reminder(s) sent, 0 failed", out.getvalue())
+
+    def make_request(self):
+        return BloodRequest.objects.create(
+            hospital="Notify Hospital", created_by=self.hospital, branch=self.branch, blood_group="A+",
+            component="Packed Red Cells", quantity=1, priority="Urgent",
+            required_by=timezone.now() + timedelta(days=1), clinical_reference="REF-NOTE",
+        )
+
+    def test_tc_f16_requester_is_emailed_on_every_status_change(self):
+        request = self.make_request()
+        transition_request(request, BloodRequest.Status.APPROVED, self.staff)
+        transition_request(request, BloodRequest.Status.CANCELLED, self.staff)
+        notes = Notification.objects.filter(recipient="notehosp@bbms.test", subject="Blood request status updated")
+        self.assertEqual(notes.count(), 2)
+        self.assertTrue(all(n.status == "SENT" for n in notes))
+        self.assertIn("Cancelled", notes.order_by("pk").last().body)
+
+    def test_tc_f16_failed_request_email_is_recorded_as_failed(self):
+        request = self.make_request()
+        with patch("bloodbank.services.send_mail", side_effect=OSError("SMTP down")):
+            transition_request(request, BloodRequest.Status.APPROVED, self.staff)
+        request.refresh_from_db()
+        self.assertEqual(request.status, BloodRequest.Status.APPROVED)
+        self.assertEqual(Notification.objects.get(recipient="notehosp@bbms.test").status, "FAILED")

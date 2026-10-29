@@ -47,6 +47,19 @@ services:
       BBMS_DEBUG: "0"
     depends_on: [db]
     restart: unless-stopped
+  reminders:
+    # FR-29: appointment reminder emails, checked every 15 minutes in their own process (SADS 3.4).
+    build: .
+    command: python manage.py send_reminders --every 900
+    environment:
+      BBMS_DB_ENGINE: postgresql
+      POSTGRES_DB: bbms
+      POSTGRES_USER: bbms
+      POSTGRES_PASSWORD: change-before-deployment
+      POSTGRES_HOST: db
+      BBMS_DEBUG: "0"
+    depends_on: [db]
+    restart: unless-stopped
   backup:
     # NFR-04 / SEC-08: one encrypted dump every 24 hours, 7 daily and 4 weekly copies kept.
     # The image needs pg_dump and gpg; BBMS_BACKUP_RECIPIENT names the key the dump is

@@ -263,6 +263,44 @@ def notify(recipient, subject, body):
     return notification
 
 
+REMINDER_LEAD = timedelta(hours=24)
+
+
+def send_appointment_reminders(now=None):
+    """FR-29: email every donor whose booked appointment starts within the next 24 hours, once.
+
+    Each email is recorded as a Notification with status SENT or FAILED. A failed reminder is not
+    marked as sent, so the next scheduled run tries again. Returns (sent, failed)."""
+    now = now or timezone.now()
+    due = (
+        Appointment.objects.select_related("donor", "slot__branch")
+        .filter(status=Appointment.Status.BOOKED, reminder_sent_at__isnull=True,
+                slot__starts_at__gt=now, slot__starts_at__lte=now + REMINDER_LEAD)
+        .order_by("slot__starts_at")
+    )
+    sent = failed = 0
+    for appointment in due:
+        slot = appointment.slot
+        notification = notify(
+            appointment.donor.email,
+            "Reminder: blood donation appointment tomorrow",
+            f"Hello {appointment.donor.full_name}, this is a reminder of your donation appointment at "
+            f"{_slot_text(slot)}. If you can no longer attend, please reschedule or cancel it from your donor record.",
+        )
+        if notification.status == "SENT":
+            appointment.reminder_sent_at = now
+            appointment.save(update_fields=["reminder_sent_at"])
+            sent += 1
+        else:
+            failed += 1
+        audit_reference(
+            None, "APPOINTMENT_REMINDER", "Appointment", appointment.pk,
+            outcome="SUCCESS" if notification.status == "SENT" else "FAILED",
+            summary=f"Reminder to {appointment.donor.email}: {notification.status}", branch=slot.branch,
+        )
+    return sent, failed
+
+
 def calculate_expiry(component, collected_at):
     """FR-15: expiry = collection time + configured shelf-life days for the component."""
     rule = ShelfLifeRule.objects.filter(component=component).first()

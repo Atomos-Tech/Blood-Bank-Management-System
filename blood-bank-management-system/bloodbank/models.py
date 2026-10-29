@@ -128,6 +128,8 @@ class Appointment(models.Model):
     slot = models.ForeignKey(AppointmentSlot, on_delete=models.PROTECT, related_name="appointments")
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.BOOKED)
     created_at = models.DateTimeField(auto_now_add=True)
+    # FR-29: set once the 24-hour reminder email has been delivered, so it is sent only once.
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)
     class Meta:
         constraints = [
             # FR-06: a donor can hold at most one active booking for the same slot.

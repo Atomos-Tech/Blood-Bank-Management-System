@@ -82,7 +82,7 @@ The app follows the layered modular monolith in SADS section 3. Views call servi
 | Presentation | `bloodbank/views.py`, `bloodbank/forms.py`, `bloodbank/templates/`, `bloodbank/urls.py` | HTTP handling, form validation, role and branch checks, role-specific pages and JSON API |
 | Business rules | `bloodbank/services.py` | Donor registration, eligibility, deferrals, appointment booking and capacity, donation recording and unit IDs, shelf-life expiry, the unit state machine (`transition_unit`), screening release and quarantine, blood request creation, the request state machine and cancellation rules, reservation, cross-match and issue, account and configuration changes, login lockout, alerts, audit and notifications |
 | Data access | `bloodbank/models.py`, `bloodbank/migrations/` | Django models, constraints, indexes and the append-only audit trail |
-| Infrastructure | `bloodbank/middleware.py`, `bloodbank/management/commands/`, `bbms/settings.py`, `docker-compose.yml`, `nginx.conf` | Branch time zones, scheduled jobs (`expire_units`, `check_alerts`), demo seeding, deployment |
+| Infrastructure | `bloodbank/middleware.py`, `bloodbank/management/commands/`, `bbms/settings.py`, `docker-compose.yml`, `nginx.conf` | Branch time zones, scheduled jobs (`expire_units`, `check_alerts`, `send_reminders`), demo seeding, deployment |
 
 Views never write to the database themselves: every create, update or delete goes through a service, and `LayeredModuleTests` fails the build if `views.py` calls `.save()`, `.objects.create()`, `.update()` or `.delete()`.
 
@@ -91,6 +91,8 @@ Views never write to the database themselves: every create, update or delete goe
 ## Scheduled unit expiry
 
 `python3 manage.py expire_units` marks every unissued unit past its expiry time as Expired, releases any reservation it held and audits each change. In `docker-compose.yml` the `scheduler` service runs it every 5 minutes (`expire_units --every 300`). For a local install, run it from cron, for example `*/5 * * * * python3 manage.py expire_units`, or from Windows Task Scheduler. Inventory, dashboard and reservation still call the same check, so pages stay correct between runs.
+
+`python3 manage.py send_reminders` emails every donor whose booked appointment starts within the next 24 hours and records each email as `SENT` or `FAILED` in `Notification` (FR-29). A reminder is sent once per appointment; a failed one is retried on the next run. The `reminders` service in `docker-compose.yml` runs it every 15 minutes (`send_reminders --every 900`); for a local install use cron, for example `*/15 * * * * python3 manage.py send_reminders`. Request-status emails go out whenever a request changes state. Set `BBMS_EMAIL_BACKEND` (and Django's `EMAIL_HOST` settings) to send real email; the default keeps messages in memory.
 
 ## Deployment truthfulness
 
