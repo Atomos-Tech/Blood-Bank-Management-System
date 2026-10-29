@@ -829,8 +829,8 @@ class ProductionHTTPSConfigurationTests(TestCase):
 
     def test_sec_05_nginx_compose_and_settings_enforce_https_and_hsts(self):
         base_dir = Path(__file__).resolve().parent.parent
-        nginx_conf = (base_dir / "nginx.conf").read_text()
-        compose_yml = (base_dir / "docker-compose.yml").read_text()
+        nginx_conf = (base_dir / "nginx.conf").read_text(encoding="utf-8")
+        compose_yml = (base_dir / "docker-compose.yml").read_text(encoding="utf-8")
 
         self.assertIn("listen 80;", nginx_conf)
         self.assertIn("return 301 https://$host$request_uri;", nginx_conf)
@@ -858,7 +858,7 @@ class PerformanceAndConcurrencyEvidenceTests(TestCase):
         base_dir = Path(__file__).resolve().parent.parent
         metrics_path = base_dir / "docs" / "test-results" / "benchmark_metrics.json"
         self.assertTrue(metrics_path.exists())
-        data = json.loads(metrics_path.read_text())
+        data = json.loads(metrics_path.read_text(encoding="utf-8"))
 
         self.assertGreaterEqual(data["environment"]["seeded_donors"], 5000)
         self.assertGreaterEqual(data["environment"]["seeded_units"], 10000)
@@ -1685,7 +1685,7 @@ class ScheduledUnitExpiryTests(TestCase):
             reserve_units(self.make_request("REF-STALE"), self.staff)
 
     def test_scheduler_service_runs_the_command_on_a_schedule(self):
-        compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()
+        compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("scheduler:", compose)
         self.assertIn("python manage.py expire_units --every 300", compose)
 
@@ -2822,7 +2822,7 @@ class CsrfAndOutputEncodingTests(TestCase):
 
     def test_every_post_form_in_templates_includes_the_token(self):
         for template in sorted(self.TEMPLATE_DIR.glob("*.html")):
-            html = template.read_text()
+            html = template.read_text(encoding="utf-8")
             forms = [f for f in html.lower().split("<form")[1:] if 'method="post"' in f.split(">")[0]]
             for form in forms:
                 with self.subTest(template=template.name):
@@ -2830,11 +2830,11 @@ class CsrfAndOutputEncodingTests(TestCase):
 
     def test_autoescaping_is_never_disabled(self):
         for template in self.TEMPLATE_DIR.glob("*.html"):
-            html = template.read_text()
+            html = template.read_text(encoding="utf-8")
             with self.subTest(template=template.name):
                 self.assertNotIn("autoescape off", html)
                 self.assertNotIn("|safe", html)
-        source = (Path(__file__).resolve().parent / "views.py").read_text()
+        source = (Path(__file__).resolve().parent / "views.py").read_text(encoding="utf-8")
         self.assertNotIn("mark_safe", source)
         self.assertNotIn("csrf_exempt", source)
 
@@ -3435,7 +3435,7 @@ class HealthCheckTests(TestCase):
         self.assertEqual(set(json.loads(body)), {"status", "database"})
 
     def test_nfr03_every_compose_service_restarts_itself_and_the_app_is_health_checked(self):
-        compose = self.COMPOSE.read_text()
+        compose = self.COMPOSE.read_text(encoding="utf-8")
         services_block = compose.split("services:\n", 1)[1].split("\nvolumes:", 1)[0]
         services = re.findall(r"(?m)^  [a-z_]+:$", services_block)
         self.assertGreaterEqual(len(services), 5)
@@ -3459,7 +3459,7 @@ class RestartPersistenceTests(TestCase):
     RESULTS = ROOT.parent / "docs" / "test-results" / "TC-N04_NFR-05_restart_persistence_results.md"
 
     def test_nfr05_postgres_data_is_on_a_named_volume(self):
-        compose = self.COMPOSE.read_text()
+        compose = self.COMPOSE.read_text(encoding="utf-8")
         # A named volume outlives `docker compose down`; a bind or anonymous mount would not.
         self.assertIn("postgres_data:/var/lib/postgresql/data", compose)
         self.assertRegex(compose, r"(?m)^volumes:$")
@@ -3471,7 +3471,7 @@ class RestartPersistenceTests(TestCase):
                 self.assertTrue(script.exists(), f"{script.name} is missing")
 
     def test_tc_n04_the_probe_covers_every_record_type_nfr05_names(self):
-        probe = self.PROBE.read_text()
+        probe = self.PROBE.read_text(encoding="utf-8")
         for record in ["donation", "screening results", "reservation", "issue"]:
             with self.subTest(record=record):
                 self.assertIn(f'"{record}"', probe)
@@ -3479,11 +3479,11 @@ class RestartPersistenceTests(TestCase):
         self.assertIn("def verify(", probe)
 
     def test_tc_n04_the_driver_restarts_and_recreates_before_verifying(self):
-        verify = self.VERIFY.read_text()
+        verify = self.VERIFY.read_text(encoding="utf-8")
         self.assertIn("restart", verify)
         # Recreating the containers while keeping the volume is the step that proves the data
         # is in Postgres rather than in a container's writable layer.
-        self.assertIn("postgres_data", verify.replace("\n", " ") + self.COMPOSE.read_text())
+        self.assertIn("postgres_data", verify.replace("\n", " ") + self.COMPOSE.read_text(encoding="utf-8"))
         self.assertIn(str(self.RESULTS.name), verify)
 
     def test_tc_n04_result_file_is_either_absent_or_records_a_real_run(self):
@@ -3491,7 +3491,7 @@ class RestartPersistenceTests(TestCase):
         exists it must carry a verdict, and if it does not, nothing claims TC-N04 has run."""
         if not self.RESULTS.exists():
             self.skipTest("TC-N04 has not been run yet; run scripts/verify_restart_persistence.py")
-        contents = self.RESULTS.read_text()
+        contents = self.RESULTS.read_text(encoding="utf-8")
         self.assertRegex(contents, r"PASS|FAIL")
         self.assertIn("NFR-05", contents)
 
@@ -3755,11 +3755,11 @@ class BackupAndRestoreTests(TestCase):
 
     @property
     def backup(self):
-        return (self.ROOT / "scripts" / "backup.sh").read_text()
+        return (self.ROOT / "scripts" / "backup.sh").read_text(encoding="utf-8")
 
     @property
     def restore(self):
-        return (self.ROOT / "scripts" / "restore.sh").read_text()
+        return (self.ROOT / "scripts" / "restore.sh").read_text(encoding="utf-8")
 
     def test_nfr04_both_scripts_exist_and_are_executable(self):
         for name in ["backup.sh", "restore.sh"]:
@@ -3805,7 +3805,7 @@ class BackupAndRestoreTests(TestCase):
         self.assertIn('trap \'rm -rf -- "$workdir"\' EXIT', restore)
 
     def test_nfr04_compose_runs_the_backup_every_24_hours_on_private_volumes(self):
-        compose = (self.ROOT / "docker-compose.yml").read_text()
+        compose = (self.ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("backup.sh", compose)
         self.assertIn("sleep 86400", compose)
         self.assertIn("backup_data:/var/backups/bbms", compose)
@@ -3815,7 +3815,7 @@ class BackupAndRestoreTests(TestCase):
         self.assertEqual(compose.count("backup_keys:/root/.gnupg"), 1)
 
     def test_nfr04_the_procedure_and_its_recovery_objective_are_documented(self):
-        docs = self.DOCS.read_text()
+        docs = self.DOCS.read_text(encoding="utf-8")
         for expected in ["NFR-03", "NFR-04", "SEC-08", "TC-N03", "/health/",
                          "4 hours", "7", "4", "restore.sh", "Maintenance"]:
             with self.subTest(expected=expected):
@@ -4323,22 +4323,22 @@ class ResponsiveLayoutTests(TestCase):
         for name in ("base.html", "login.html"):
             with self.subTest(template=name):
                 self.assertIn('name="viewport" content="width=device-width,initial-scale=1"',
-                              (self.TEMPLATES / name).read_text())
+                              (self.TEMPLATES / name).read_text(encoding="utf-8"))
 
     def test_stylesheet_has_tablet_and_phone_breakpoints_without_page_overflow(self):
-        css = self.CSS.read_text()
+        css = self.CSS.read_text(encoding="utf-8")
         self.assertIn("@media(max-width:850px)", css)
         self.assertIn("@media(max-width:520px)", css)
         self.assertIn("grid-template-columns:minmax(0,1fr)", css)
         self.assertIn(".panel{min-width:0;overflow-x:auto}", css)
 
     def test_sign_out_stays_reachable_on_small_screens(self):
-        base = (self.TEMPLATES / "base.html").read_text()
+        base = (self.TEMPLATES / "base.html").read_text(encoding="utf-8")
         self.assertIn('class="mobile-signout"', base)
-        self.assertIn(".mobile-signout{display:block", self.CSS.read_text())
+        self.assertIn(".mobile-signout{display:block", self.CSS.read_text(encoding="utf-8"))
 
     def test_inventory_filters_have_accessible_labels(self):
-        html = (self.TEMPLATES / "inventory.html").read_text()
+        html = (self.TEMPLATES / "inventory.html").read_text(encoding="utf-8")
         for label in ("Blood group", "Component", "Branch", "Expires before"):
             self.assertIn(f'aria-label="{label}"', html)
 
