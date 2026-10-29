@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 from importlib import import_module
 import uuid
@@ -9,7 +10,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Q
 from django.core.mail import send_mail
 from django.utils import timezone
-from .models import (COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation, DonationType,
+from .models import (COMPONENT_CODES, SCREENING_QUESTIONS, Appointment, AuditEvent, BloodRequest, BloodUnit, Branch, CrossMatch, Deferral, Donation, DonationType, Donor,
                      EligibilityRule, Issue, LabResult, Notification, Reservation, RequestTransition,
                      ShelfLifeRule, TestType, UserProfile)
 
@@ -383,7 +384,7 @@ def _lock_slot(slot):
 def _check_slot_bookable(donor, slot, ignore=None):
     if slot.starts_at <= timezone.now():
         raise AppointmentError("This slot is in the past. Choose a future slot.")
-    booked = slot.appointments.filter(status=Appointment.Status.BOOKED)
+    booked = slot.appointments.filter(status__in=Appointment.ACTIVE_STATUSES)
     if ignore is not None:
         booked = booked.exclude(pk=ignore.pk)
     if booked.filter(donor=donor).exists():
@@ -440,6 +441,73 @@ def cancel_appointment(appointment, user):
               branch=appointment.slot.branch)
     notify(appointment.donor.email, "Donation appointment cancelled",
            f"Your appointment at {_slot_text(appointment.slot)} has been cancelled.")
+    return appointment
+
+
+def find_donors(query, branch=None, limit=50):
+    """NFR-07: donor lookup for staff by name, email, phone, blood group or donor number, limited to
+    the staff member's branch."""
+    donors = Donor.objects.order_by("full_name")
+    if branch is not None:
+        donors = donors.filter(Q(branch=branch) | Q(branch__isnull=True))
+    query = (query or "").strip()
+    if query:
+        digits = re.sub(r"\D", "", query)
+        match = Q(full_name__icontains=query) | Q(email__icontains=query) | Q(blood_group__iexact=query)
+        if digits:
+            match |= Q(phone__contains=digits)
+            if digits == query.lstrip("#"):
+                match |= Q(pk=int(digits))
+        donors = donors.filter(match)
+    else:
+        donors = donors.order_by("-created_at")
+    donors = list(donors[:limit])
+    upcoming = (
+        Appointment.objects.select_related("slot__branch")
+        .filter(donor__in=donors, status__in=Appointment.ACTIVE_STATUSES,
+                slot__starts_at__gte=_start_of_today())
+        .order_by("slot__starts_at")
+    )
+    next_by_donor = {}
+    for appointment in upcoming:
+        next_by_donor.setdefault(appointment.donor_id, appointment)
+    for donor in donors:
+        donor.next_appointment = next_by_donor.get(donor.pk)
+    return donors
+
+
+def _start_of_today():
+    local = timezone.localtime()
+    return local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def todays_appointments(branch=None):
+    """NFR-07: the day's bookings at the branch, in time order, for the check-in desk."""
+    start = _start_of_today()
+    appointments = (
+        Appointment.objects.select_related("donor", "slot__branch")
+        .filter(slot__starts_at__gte=start, slot__starts_at__lt=start + timedelta(days=1),
+                status__in=Appointment.ACTIVE_STATUSES)
+        .order_by("slot__starts_at", "donor__full_name")
+    )
+    if branch is not None:
+        appointments = appointments.filter(slot__branch=branch)
+    return appointments
+
+
+def check_in_appointment(appointment, user):
+    """NFR-07: mark a booked donor as arrived. Only today's bookings can be checked in."""
+    if appointment.status != Appointment.Status.BOOKED:
+        raise AppointmentError("Only a booked appointment can be checked in.")
+    if timezone.localdate(appointment.slot.starts_at) != timezone.localdate():
+        raise AppointmentError("Only today's appointments can be checked in.")
+    with transaction.atomic():
+        appointment.status = Appointment.Status.CHECKED_IN
+        appointment.checked_in_at = timezone.now()
+        appointment.checked_in_by = user
+        appointment.save(update_fields=["status", "checked_in_at", "checked_in_by"])
+        audit(user, "APPOINTMENT_CHECKED_IN", appointment, summary=f"{appointment.donor.full_name}, "
+              f"{_slot_text(appointment.slot)}", branch=appointment.slot.branch)
     return appointment
 
 

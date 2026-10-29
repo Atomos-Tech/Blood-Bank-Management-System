@@ -85,16 +85,23 @@ def _restart_drill():
     return verdict, "`blood-bank-management-system/docs/test-results/TC-N04_NFR-05_restart_persistence_results.md`"
 
 
+def _usability_trial():
+    trial = REPO / "docs" / "test-results" / "TC-N06_NFR-07_usability_trial.md"
+    if "_(to be filled during the TC-N06 trial)_" in trial.read_text(encoding="utf-8"):
+        return "Not executed (trial pending)", "Timed first-time-user trial not yet recorded in `docs/test-results/TC-N06_NFR-07_usability_trial.md`"
+    return "See trial record", "`docs/test-results/TC-N06_NFR-07_usability_trial.md`"
+
+
 DRILLS = {
     "TC-N01": lambda: _benchmark("TC-N01_NFR-01_load_test_results.md"),
     "TC-N02": lambda: _benchmark("TC-N02_NFR-02_reservation_concurrency_results.md"),
     "TC-N03": _restore_drill,
     "TC-N04": _restart_drill,
+    "TC-N06": _usability_trial,
 }
 # Cases still waiting on an open backlog item; listed so a gap is visible rather than silently missing.
 OPEN_ITEMS = {
     "TC-N05": "BB-43 (#45)",
-    "TC-N06": "BB-44 (#46)",
 }
 CASE_PATTERN = re.compile(r"TC-[FSN]\d\d")
 METHOD_PATTERN = re.compile(r"tc_([fsn])(\d\d)")
@@ -213,7 +220,8 @@ def main():
         "Status meanings: **Pass** — every automated test for the case passed in this run. "
         "**Pass (benchmark recorded)** — the performance run's measured results are committed and pass their "
         "thresholds. **Not executed (drill pending)** — the case needs a Docker drill that has not been "
-        "recorded yet. **Not executed** — no test exists yet because its backlog item is still open.",
+        "recorded yet. **Not executed (trial pending)** — the case needs a timed session with a first-time user that "
+        "has not been recorded yet. **Not executed** — no test exists yet because its backlog item is still open.",
         "",
     ]
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)

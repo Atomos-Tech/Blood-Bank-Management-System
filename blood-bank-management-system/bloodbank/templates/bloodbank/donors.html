@@ -1,1 +1,31 @@
-{% extends 'bloodbank/base.html' %}{% block title %}Donor directory{% endblock %}{% block content %}<div class="grid2"><section class="panel"><h3>Register donor</h3><form method="post" class="form-grid">{% csrf_token %}{{ form.as_p }}<button class="primary">Register donor</button></form></section><section class="panel"><table><tr><th>Name</th><th>Contact</th><th>Eligibility</th><th></th></tr>{% for donor in donors %}<tr><td>{{ donor.full_name }}<br><small>{{ donor.blood_group }}</small></td><td>{{ donor.email }}<br>{{ donor.phone }}</td><td>{{ donor.eligibility_date|default:'Review required' }}</td><td><a class="action" href="{% url 'appointments' %}?donor={{ donor.pk }}">Book</a></td></tr>{% endfor %}</table></section></div>{% endblock %}
+{% extends 'bloodbank/base.html' %}{% block title %}Donor directory{% endblock %}{% block content %}
+<div class="grid2 donor-desk">
+<section class="panel lookup">
+  <form method="get" class="search-bar" role="search">
+    <label for="id_q">Find donor</label>
+    <div class="search-row">{{ search.q }}<button class="primary">Search</button>{% if query %}<a class="quiet" href="{% url 'donors' %}">Clear</a>{% endif %}</div>
+  </form>
+  <p class="result-count">{% if query %}{{ donors|length }} donor{{ donors|length|pluralize }} matching “{{ query }}”{% else %}Most recently registered donors{% endif %}</p>
+  <div class="table-scroll"><table class="donor-table">
+    <tr><th>Donor</th><th>Contact</th><th>Next appointment</th><th>Eligible from</th><th></th></tr>
+    {% for donor in donors %}<tr>
+      <td><b>{{ donor.full_name }}</b><br><small>#{{ donor.pk }} · {{ donor.blood_group }}</small></td>
+      <td>{{ donor.email }}<br><small>{{ donor.phone }}</small></td>
+      <td>{% with ap=donor.next_appointment %}{% if ap %}{{ ap.slot.starts_at|date:"d M, H:i" }}<br><small>{{ ap.get_status_display }}</small>{% else %}<small>None booked</small>{% endif %}{% endwith %}</td>
+      <td>{{ donor.eligibility_date|date:"d M Y"|default:"Now" }}</td>
+      <td class="row-actions">{% with ap=donor.next_appointment %}{% if ap and ap.status == 'BOOKED' and ap.slot.starts_at|date:"Ymd" == now_ymd %}<form method="post" action="{% url 'check_in' ap.pk %}">{% csrf_token %}<input type="hidden" name="next" value="{{ request.get_full_path }}"><button class="primary small">Check in</button></form>{% endif %}{% endwith %}<a class="action" href="{% url 'appointments' %}?donor={{ donor.pk }}">Book</a></td>
+    </tr>{% empty %}<tr><td colspan="5">No donor found{% if query %} for “{{ query }}”. Check the spelling, or register the donor below{% endif %}.</td></tr>{% endfor %}
+  </table></div>
+</section>
+<section class="panel checkin">
+  <h3>Today's appointments</h3>
+  {% for ap in today %}<div class="checkin-row{% if ap.status == 'CHECKED_IN' %} done{% endif %}">
+    <div><b>{{ ap.slot.starts_at|date:"H:i" }}</b> {{ ap.donor.full_name }}<br><small>#{{ ap.donor.pk }} · {{ ap.donor.blood_group }} · {{ ap.slot.branch.code }}</small></div>
+    {% if ap.status == 'BOOKED' %}<form method="post" action="{% url 'check_in' ap.pk %}">{% csrf_token %}<button class="primary small">Check in</button></form>{% else %}<span class="pill Available">Checked in {{ ap.checked_in_at|date:"H:i" }}</span>{% endif %}
+  </div>{% empty %}<p class="result-count">No appointments booked for today.</p>{% endfor %}
+</section>
+</div>
+<details class="panel register"{% if open_register %} open{% endif %}><summary><h3>Register a new donor</h3></summary>
+  <form method="post" class="form-grid">{% csrf_token %}{{ form.as_p }}<button class="primary">Register donor</button></form>
+</details>
+{% endblock %}

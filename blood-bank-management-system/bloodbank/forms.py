@@ -126,7 +126,7 @@ class AppointmentForm(forms.Form):
         slots = (
             AppointmentSlot.objects.select_related("branch")
             .filter(starts_at__gt=timezone.now())
-            .annotate(booked=models.Count("appointments", filter=models.Q(appointments__status=Appointment.Status.BOOKED)))
+            .annotate(booked=models.Count("appointments", filter=models.Q(appointments__status__in=Appointment.ACTIVE_STATUSES)))
             .annotate(free=models.F("capacity") - models.F("booked"))
             .filter(free__gt=0)
             .order_by("starts_at")
@@ -136,6 +136,18 @@ class AppointmentForm(forms.Form):
         if exclude_slot is not None:
             slots = slots.exclude(pk=exclude_slot.pk)
         self.fields["slot"].queryset = slots
+
+
+class DonorSearchForm(forms.Form):
+    """NFR-07: one box that finds a donor by name, email, phone or donor number."""
+
+    q = forms.CharField(
+        required=False, max_length=120, label="Find donor",
+        widget=forms.TextInput(attrs={
+            "type": "search", "placeholder": "Name, email, phone or donor no.", "autofocus": True,
+            "aria-label": "Find donor by name, email, phone or donor number",
+        }),
+    )
 
 
 class BranchFilterForm(forms.Form):

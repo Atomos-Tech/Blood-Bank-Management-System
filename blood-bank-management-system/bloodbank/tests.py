@@ -50,6 +50,7 @@ from .models import (
     UserProfile,
 )
 from .services import (
+    check_in_appointment,
     send_appointment_reminders,
     AppointmentError,
     GENERIC_LOGIN_ERROR,
@@ -4205,3 +4206,103 @@ class AppointmentReminderAndRequestEmailTests(TestCase):
         request.refresh_from_db()
         self.assertEqual(request.status, BloodRequest.Status.APPROVED)
         self.assertEqual(Notification.objects.get(recipient="notehosp@bbms.test").status, "FAILED")
+
+
+class DonorLookupAndCheckInTests(TestCase):
+    """BB-44 [NFR-07] / TC-N06: staff find a donor from one search box and check them in for
+    today's appointment. The timed first-time-user trial itself is recorded in
+    docs/test-results/TC-N06_NFR-07_usability_trial.md."""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name="Desk Branch", code="DESK")
+        self.other_branch = Branch.objects.create(name="Far Branch", code="FAR")
+        self.staff = User.objects.create_user("desk@bbms.test", email="desk@bbms.test", password="pw")
+        UserProfile.objects.create(user=self.staff, role=UserProfile.Role.STAFF, branch=self.branch)
+        self.ira = self.make_donor("Ira Desai", "ira.desai@example.test", "9845000111", "B+", self.branch)
+        self.raj = self.make_donor("Raj Kumar", "raj.k@example.test", "9845000222", "O-", self.branch)
+        self.far = self.make_donor("Ira Faraway", "far@example.test", "9845000333", "A+", self.other_branch)
+        later_today = timezone.localtime().replace(hour=23, minute=0, second=0, microsecond=0)
+        self.today_slot = AppointmentSlot.objects.create(branch=self.branch, starts_at=later_today, capacity=3)
+        self.tomorrow_slot = AppointmentSlot.objects.create(
+            branch=self.branch, starts_at=later_today + timedelta(days=1), capacity=3
+        )
+        self.appointment = Appointment.objects.create(donor=self.ira, slot=self.today_slot)
+        self.tomorrow = Appointment.objects.create(donor=self.raj, slot=self.tomorrow_slot)
+        self.client.force_login(self.staff)
+
+    @staticmethod
+    def make_donor(name, email, phone, group, branch):
+        return Donor.objects.create(
+            branch=branch, full_name=name, email=email, phone=phone, blood_group=group,
+            date_of_birth=EligibilityRuleUnitTests.birthday(30), weight_kg=70, consent_given=True,
+        )
+
+    def found(self, query):
+        return [d.full_name for d in self.client.get("/donors/", {"q": query}).context["donors"]]
+
+    def test_tc_n06_search_by_name_email_phone_and_donor_number(self):
+        self.assertEqual(self.found("ira"), ["Ira Desai"])
+        self.assertEqual(self.found("RAJ.K@EXAMPLE"), ["Raj Kumar"])
+        self.assertEqual(self.found("98450-00222"), ["Raj Kumar"])
+        self.assertEqual(self.found(f"#{self.ira.pk}"), ["Ira Desai"])
+        self.assertEqual(self.found("O-"), ["Raj Kumar"])
+
+    def test_search_stays_inside_the_staff_branch(self):
+        self.assertNotIn("Ira Faraway", self.found("Ira"))
+
+    def test_search_result_shows_todays_appointment_with_check_in(self):
+        response = self.client.get("/donors/", {"q": "Ira"})
+        self.assertEqual(response.context["donors"][0].next_appointment, self.appointment)
+        self.assertContains(response, f'action="/appointments/{self.appointment.pk}/check-in/"')
+        self.assertContains(response, "matching")
+
+    def test_no_match_says_so(self):
+        self.assertContains(self.client.get("/donors/", {"q": "Nobody"}), "No donor found")
+
+    def test_todays_appointments_panel_lists_only_today_at_this_branch(self):
+        today = list(self.client.get("/donors/").context["today"])
+        self.assertEqual(today, [self.appointment])
+
+    def test_tc_n06_check_in_marks_arrival_and_is_audited(self):
+        response = self.client.post(f"/appointments/{self.appointment.pk}/check-in/", {"next": "/donors/?q=Ira"})
+        self.assertRedirects(response, "/donors/?q=Ira", fetch_redirect_response=False)
+        self.appointment.refresh_from_db()
+        self.assertEqual(self.appointment.status, Appointment.Status.CHECKED_IN)
+        self.assertEqual(self.appointment.checked_in_by, self.staff)
+        self.assertIsNotNone(self.appointment.checked_in_at)
+        event = AuditEvent.objects.get(event_type="APPOINTMENT_CHECKED_IN")
+        self.assertEqual(event.record_id, str(self.appointment.pk))
+        self.assertContains(self.client.get("/donors/"), "Checked in")
+
+    def test_only_todays_booked_appointments_can_be_checked_in(self):
+        self.client.post(f"/appointments/{self.tomorrow.pk}/check-in/")
+        self.tomorrow.refresh_from_db()
+        self.assertEqual(self.tomorrow.status, Appointment.Status.BOOKED)
+        self.client.post(f"/appointments/{self.appointment.pk}/check-in/")
+        response = self.client.post(f"/appointments/{self.appointment.pk}/check-in/", follow=True)
+        self.assertContains(response, "Only a booked appointment can be checked in.")
+
+    def test_checked_in_donor_still_holds_a_place_in_the_slot(self):
+        self.today_slot.capacity = 1
+        self.today_slot.save()
+        check_in_appointment(self.appointment, self.staff)
+        with self.assertRaisesMessage(AppointmentError, "This slot is full."):
+            book_appointment(self.raj, self.today_slot, self.staff)
+
+    def test_other_roles_and_branches_cannot_check_in(self):
+        far_staff = User.objects.create_user("farstaff@bbms.test", email="farstaff@bbms.test", password="pw")
+        UserProfile.objects.create(user=far_staff, role=UserProfile.Role.STAFF, branch=self.other_branch)
+        self.client.force_login(far_staff)
+        self.assertEqual(self.client.post(f"/appointments/{self.appointment.pk}/check-in/").status_code, 403)
+        donor_user = User.objects.create_user("deskdonor@bbms.test", email="deskdonor@bbms.test", password="pw")
+        UserProfile.objects.create(user=donor_user, role=UserProfile.Role.DONOR)
+        self.client.force_login(donor_user)
+        self.assertEqual(self.client.post(f"/appointments/{self.appointment.pk}/check-in/").status_code, 403)
+        self.appointment.refresh_from_db()
+        self.assertEqual(self.appointment.status, Appointment.Status.BOOKED)
+
+    def test_usability_trial_procedure_is_documented(self):
+        trial = Path(__file__).resolve().parent.parent.parent / "docs" / "test-results" / "TC-N06_NFR-07_usability_trial.md"
+        text = trial.read_text(encoding="utf-8")
+        self.assertIn("within **5 minutes**", text)
+        self.assertIn("Task card", text)

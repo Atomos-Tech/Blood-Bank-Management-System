@@ -13,7 +13,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_http_methods, require_POST
-from .forms import (AppointmentForm, AppointmentSlotForm, BloodRequestForm, BranchConfigForm,
+from .forms import (DonorSearchForm, AppointmentForm, AppointmentSlotForm, BloodRequestForm, BranchConfigForm,
                     BranchFilterForm, CrossMatchForm, DeferralForm,
                     DonorForm, DonationForm, EligibilityRuleForm, LabResultForm, ReportFilterForm,
                     ShelfLifeRuleForm, UserAccountForm, UserRoleForm)
@@ -27,7 +27,8 @@ from .services import (AppointmentError, DuplicateLabResult, GENERIC_LOGIN_ERROR
                        register_donor, request_action_target, save_configuration,
                        cancel_appointment as cancel_appointment_service, reschedule_appointment,
                        check_stock_and_expiry_alerts, clear_login_failures, create_account,
-                       discard_unit, donor_history, eligibility, end_user_sessions,
+                       check_in_appointment, discard_unit, donor_history, eligibility, end_user_sessions,
+                       find_donors, todays_appointments,
                        expire_units, record_donation, record_lab_result, record_login_failure,
                        get_branch_warnings, issue_reservation, release_reservation,
                        release_screened_unit, reserve_units, set_account_active, transition_request)
@@ -267,12 +268,42 @@ def donor_list(request):
         register_donor(form.save(commit=False), request.user, branch=ub)
         messages.success(request, "Donor registered.")
         return redirect("donors")
-    donors_qs = Donor.objects.order_by("-created_at")
-    if ub:
-        donors_qs = donors_qs.filter(Q(branch=ub) | Q(branch__isnull=True))
-    elif req_branch:
-        donors_qs = donors_qs.filter(branch_id=req_branch)
-    return render(request, "bloodbank/donors.html", {"donors": donors_qs, "form": form})
+    # NFR-07: one search box finds the donor; today's bookings sit next to it for check-in.
+    search = DonorSearchForm(request.GET or None)
+    query = search.cleaned_data["q"] if search.is_valid() else ""
+    scope = ub or (Branch.objects.filter(pk=req_branch).first() if req_branch else None)
+    return render(
+        request,
+        "bloodbank/donors.html",
+        {
+            "donors": find_donors(query, branch=scope),
+            "query": query,
+            "search": search,
+            "today": todays_appointments(branch=scope),
+            "form": form,
+            "open_register": request.method == "POST",
+            "now_ymd": timezone.localdate().strftime("%Y%m%d"),
+        },
+    )
+
+
+@login_required
+@require_POST
+def check_in_view(request, pk):
+    """NFR-07: blood bank staff check a donor in when they arrive for today's appointment."""
+    if not allowed(request.user, STAFF):
+        return deny(request.user)
+    ap = get_object_or_404(Appointment.objects.select_related("donor", "slot__branch"), pk=pk)
+    if not in_branch_scope(request.user, ap.slot.branch_id):
+        return deny(request.user, "Cross-branch appointment check-in denied")
+    try:
+        check_in_appointment(ap, request.user)
+    except AppointmentError as error:
+        messages.error(request, str(error))
+    else:
+        messages.success(request, f"{ap.donor.full_name} checked in for {timezone.localtime(ap.slot.starts_at):%H:%M}.")
+    next_url = request.POST.get("next", "")
+    return redirect(next_url if next_url.startswith("/donors/") else "donors")
 
 
 @login_required

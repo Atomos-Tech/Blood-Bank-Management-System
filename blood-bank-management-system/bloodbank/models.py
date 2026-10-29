@@ -118,18 +118,23 @@ class AppointmentSlot(models.Model):
     capacity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     class Meta: unique_together = [("branch", "starts_at")]
     @property
-    def booked_count(self): return self.appointments.filter(status=Appointment.Status.BOOKED).count()
+    def booked_count(self): return self.appointments.filter(status__in=Appointment.ACTIVE_STATUSES).count()
     @property
     def available(self): return self.capacity - self.booked_count
 
 class Appointment(models.Model):
-    class Status(models.TextChoices): BOOKED="BOOKED","Booked"; CANCELLED="CANCELLED","Cancelled"
+    class Status(models.TextChoices): BOOKED="BOOKED","Booked"; CHECKED_IN="CHECKED_IN","Checked in"; CANCELLED="CANCELLED","Cancelled"
+    # A checked-in donor still holds a place in the slot (FR-06).
+    ACTIVE_STATUSES = (Status.BOOKED, Status.CHECKED_IN)
     donor = models.ForeignKey(Donor, on_delete=models.PROTECT, related_name="appointments")
     slot = models.ForeignKey(AppointmentSlot, on_delete=models.PROTECT, related_name="appointments")
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.BOOKED)
     created_at = models.DateTimeField(auto_now_add=True)
     # FR-29: set once the 24-hour reminder email has been delivered, so it is sent only once.
     reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    # NFR-07: staff check the donor in on arrival.
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_in_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     class Meta:
         constraints = [
             # FR-06: a donor can hold at most one active booking for the same slot.
